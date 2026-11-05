@@ -1258,6 +1258,9 @@ impl eframe::App for PlexiApp {
             && (start.overlay || start.background)
         {
             self.enter_overlay(&ctx, start.background);
+            if let Mode::Overlay(o) = &mut self.mode {
+                o.hint_until = 0.0; // nothing to explain at login
+            }
         }
         self.poll_jobs();
         self.handle_shell_events(&ctx);

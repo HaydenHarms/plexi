@@ -39,7 +39,7 @@ fn main() -> ExitCode {
         shell: true,
     };
     let (rgba, w, h) = app_icon_rgba(64);
-    let viewport = egui::ViewportBuilder::default()
+    let mut viewport = egui::ViewportBuilder::default()
         .with_title("Plexi")
         .with_app_id("plexi")
         .with_inner_size([1040.0, 760.0])
@@ -48,6 +48,13 @@ fn main() -> ExitCode {
         .with_transparent(true)
         .with_drag_and_drop(true)
         .with_icon(Arc::new(egui::IconData { rgba, width: w, height: h }));
+    if start.overlay || start.background {
+        // Start already frameless so the notebook window never flashes up first.
+        viewport = viewport.with_decorations(false).with_taskbar(false).with_always_on_top();
+    }
+    if start.background {
+        viewport = viewport.with_mouse_passthrough(true);
+    }
     let options =
         eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, centered: true, ..Default::default() };
     let result = eframe::run_native("Plexi", options, Box::new(move |cc| Ok(Box::new(app::PlexiApp::new(cc, start)))));
