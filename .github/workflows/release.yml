@@ -68,8 +68,10 @@ jobs:
           if (-not (Test-Path $iscc)) {
             choco install innosetup -y --no-progress
           }
-          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" "/DSourceExe=..\target\release\plexi.exe" "/O..\dist" installer\plexi.iss
+          $root = (Get-Location).Path
+          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" "/DSourceExe=$root\target\release\plexi.exe" "/O$root\dist" installer\plexi.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          if (-not (Test-Path "dist/Plexi-${{ steps.version.outputs.version }}-setup.exe")) { throw "installer missing" }
 
       - name: MSI (WiX)
         shell: pwsh
