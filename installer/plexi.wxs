@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WiX (v5) package for Plexi: an all-users MSI for managed machines.
+  Built by .github/workflows/release.yml:
+    wix build installer/plexi.wxs -arch x64 -d Version=0.1.0 -d SourceExe=target/release/plexi.exe -o dist/Plexi-0.1.0-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Plexi" Manufacturer="Hayden Harms" Version="$(var.Version)"
+           UpgradeCode="5D0F1A63-2C4B-4E3A-9B6E-7A1F0C2D8E91" Scope="perMachine" Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Plexi is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="PlexiIcon" SourceFile="assets/plexi.ico" />
+    <Property Id="ARPPRODUCTICON" Value="PlexiIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/HaydenHarms/plexi" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Plexi">
+        <Component Id="PlexiExe">
+          <File Id="PlexiExeFile" Source="$(var.SourceExe)" Name="plexi.exe" KeyPath="yes" />
+          <ProgId Id="Plexi.Notebook" Description="Plexi notebook" Icon="PlexiExeFile" IconIndex="0">
+            <Extension Id="plexi" ContentType="application/x-plexi">
+              <Verb Id="open" Command="Open" TargetFile="PlexiExeFile" Argument="&quot;%1&quot;" />
+            </Extension>
+          </ProgId>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="PlexiShortcuts">
+        <Shortcut Id="PlexiStartMenu" Name="Plexi" Target="[INSTALLFOLDER]plexi.exe" WorkingDirectory="INSTALLFOLDER" />
+        <Shortcut Id="PlexiDrawStartMenu" Name="Plexi (draw on screen)" Target="[INSTALLFOLDER]plexi.exe"
+                  Arguments="--draw" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKMU" Key="Software\Plexi" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Plexi">
+      <ComponentRef Id="PlexiExe" />
+      <ComponentRef Id="PlexiShortcuts" />
+    </Feature>
+  </Package>
+</Wix>

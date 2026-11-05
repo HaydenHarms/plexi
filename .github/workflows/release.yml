@@ -1,0 +1,107 @@
+name: Release
+
+# Push a tag like v0.2.0 to publish a GitHub release with:
+#   Plexi-<version>-setup.exe      per-user installer (no admin), Start menu, .plexi files, optional autostart
+#   Plexi-<version>-x64.msi        all-users MSI for managed machines
+#   Plexi-<version>-portable.exe   single exe; keeps its data in a PlexiData folder beside it
+#   Plexi-<version>-portable.zip   the same, unpacked into a Plexi folder
+#   SHA256SUMS.txt
+# Running the workflow by hand builds everything and attaches it as a workflow artifact instead.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $v = ($meta.packages | Where-Object name -eq 'plexi').version
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "Tag $env:GITHUB_REF_NAME does not match Cargo version $v"
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build
+        run: cargo build --release -p plexi
+
+      - name: Smoke test the release exe
+        shell: pwsh
+        run: |
+          ./target/release/plexi.exe --version
+          cargo run -q -p plexi-core --example demo -- demo.plexi
+          ./target/release/plexi.exe export demo.plexi demo.pdf
+          if (-not (Test-Path demo.pdf)) { throw "export failed" }
+
+      - name: Portable builds
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Force dist, pkg/Plexi | Out-Null
+          Copy-Item target/release/plexi.exe "dist/Plexi-$v-portable.exe"
+          Copy-Item target/release/plexi.exe pkg/Plexi/plexi.exe
+          Copy-Item LICENSE pkg/Plexi/LICENSE.txt
+          Set-Content pkg/Plexi/plexi-portable "Plexi keeps its settings and notes in the PlexiData folder next to plexi.exe while this file exists."
+          Compress-Archive -Path pkg/Plexi -DestinationPath "dist/Plexi-$v-portable.zip"
+
+      - name: Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" "/DSourceExe=..\target\release\plexi.exe" "/O..\dist" installer\plexi.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: MSI (WiX)
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix build installer/plexi.wxs -arch x64 -d "Version=${{ steps.version.outputs.version }}" -d SourceExe=target/release/plexi.exe -o "dist/Plexi-${{ steps.version.outputs.version }}-x64.msi"
+          if ($LASTEXITCODE -ne 0) { throw "wix failed" }
+          Remove-Item dist/*.wixpdb -ErrorAction SilentlyContinue
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -File | Where-Object Name -ne SHA256SUMS.txt | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content dist/SHA256SUMS.txt
+          Get-Content dist/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plexi-${{ steps.version.outputs.version }}
+          path: dist/*
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            **Which download?**
+            - `Plexi-${{ steps.version.outputs.version }}-setup.exe` — the normal installer. No admin needed; adds Start menu entries, opens `.plexi` files, and can start Plexi with Windows.
+            - `Plexi-${{ steps.version.outputs.version }}-portable.exe` — nothing to install. Keeps its settings and autosaves in a `PlexiData` folder next to the exe.
+            - `Plexi-${{ steps.version.outputs.version }}-portable.zip` — the portable build in a folder, for USB sticks.
+            - `Plexi-${{ steps.version.outputs.version }}-x64.msi` — all-users MSI for managed PCs.
+
+            Builds are not code-signed yet, so Windows SmartScreen may warn on first run ("More info" → "Run anyway").

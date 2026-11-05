@@ -1,0 +1,13 @@
+//! Plexi's document model, ink geometry, `.plexi` file format and exporters.
+//!
+//! Nothing here depends on the UI, so it can be tested headless and reused by the
+//! command-line exporter.
+
+pub mod export;
+pub mod format;
+pub mod geom;
+pub mod ink;
+pub mod model;
+
+pub use geom::Rect;
+pub use model::*;

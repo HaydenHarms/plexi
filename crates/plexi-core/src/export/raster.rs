@@ -1,0 +1,133 @@
+//! Raster export: render the page SVG with resvg, then encode.
+
+use std::io::Cursor;
+
+use resvg::tiny_skia;
+
+use super::{Assets, ExportError, ExportFormat, RenderOptions, parse_svg, svg};
+use crate::geom::Rect;
+use crate::model::{Color, Page};
+
+/// Largest output side, to keep a stray scale factor from allocating gigabytes.
+pub const MAX_SIDE: u32 = 16384;
+
+/// Render a page to a straight-alpha RGBA image.
+pub fn page_rgba(page: &Page, assets: &Assets, opts: &RenderOptions) -> Result<image::RgbaImage, ExportError> {
+    area_rgba(page, assets, opts, page.export_bounds())
+}
+
+/// Render an explicit area of a page.
+pub fn area_rgba(
+    page: &Page,
+    assets: &Assets,
+    opts: &RenderOptions,
+    area: Rect,
+) -> Result<image::RgbaImage, ExportError> {
+    let doc = svg::page_svg_in(page, assets, opts, area);
+    let tree = parse_svg(&doc)?;
+    let size = tree.size();
+    let mut scale = opts.scale.max(0.01);
+    let longest = size.width().max(size.height()) * scale;
+    if longest > MAX_SIDE as f32 {
+        scale *= MAX_SIDE as f32 / longest;
+    }
+    let w = ((size.width() * scale).ceil() as u32).max(1);
+    let h = ((size.height() * scale).ceil() as u32).max(1);
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).ok_or_else(|| ExportError::Svg("empty image".into()))?;
+    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    let mut img = image::RgbaImage::new(w, h);
+    for (dst, src) in img.pixels_mut().zip(pixmap.pixels()) {
+        let c = src.demultiply();
+        *dst = image::Rgba([c.red(), c.green(), c.blue(), c.alpha()]);
+    }
+    Ok(img)
+}
+
+pub fn page_png(page: &Page, assets: &Assets, opts: &RenderOptions) -> Result<Vec<u8>, ExportError> {
+    page_bytes(page, assets, opts, ExportFormat::Png)
+}
+
+/// Composite onto an opaque color, for formats without alpha.
+pub fn flatten(img: &image::RgbaImage, under: Color) -> image::RgbImage {
+    let mut out = image::RgbImage::new(img.width(), img.height());
+    for (dst, src) in out.pixels_mut().zip(img.pixels()) {
+        let a = src[3] as u32;
+        let mix = |c: u8, u: u8| ((c as u32 * a + u as u32 * (255 - a)) / 255) as u8;
+        *dst = image::Rgb([mix(src[0], under.r()), mix(src[1], under.g()), mix(src[2], under.b())]);
+    }
+    out
+}
+
+pub fn encode(img: &image::RgbaImage, format: ExportFormat, under: Color) -> Result<Vec<u8>, ExportError> {
+    let mut out = Cursor::new(Vec::new());
+    match format {
+        ExportFormat::Png => img.write_to(&mut out, image::ImageFormat::Png)?,
+        ExportFormat::Webp => img.write_to(&mut out, image::ImageFormat::WebP)?,
+        ExportFormat::Tiff => img.write_to(&mut out, image::ImageFormat::Tiff)?,
+        ExportFormat::Jpeg => {
+            let rgb = flatten(img, under);
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92).encode_image(&rgb)?;
+        }
+        ExportFormat::Bmp => flatten(img, under).write_to(&mut out, image::ImageFormat::Bmp)?,
+        f => return Err(ExportError::Other(format!("{f:?} is not a raster format"))),
+    }
+    Ok(out.into_inner())
+}
+
+pub fn page_bytes(
+    page: &Page,
+    assets: &Assets,
+    opts: &RenderOptions,
+    format: ExportFormat,
+) -> Result<Vec<u8>, ExportError> {
+    let img = page_rgba(page, assets, opts)?;
+    let under = if page.paper.a() > 0 { page.paper.with_alpha(255) } else { Color::WHITE };
+    encode(&img, format, under)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::*;
+
+    #[test]
+    fn ink_shows_up_in_pixels() {
+        let mut page = Page::new("p", PageSize::Custom([100.0, 100.0]));
+        page.elements.push(Element::Stroke(Stroke {
+            id: 1,
+            kind: InkKind::Pen,
+            color: Color::rgb(255, 0, 0),
+            width: 10.0,
+            points: vec![InkPoint::new(10.0, 50.0, 0.5), InkPoint::new(90.0, 50.0, 0.5)],
+        }));
+        let img = page_rgba(&page, &Assets::new(), &RenderOptions { scale: 1.0, ..Default::default() }).unwrap();
+        assert_eq!((img.width(), img.height()), (100, 100));
+        assert_eq!(img.get_pixel(50, 50).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(50, 10).0, [255, 255, 255, 255]);
+        // Transparent overlay page: no paper.
+        page.paper = Color::TRANSPARENT;
+        let img = page_rgba(&page, &Assets::new(), &RenderOptions { scale: 1.0, ..Default::default() }).unwrap();
+        assert_eq!(img.get_pixel(50, 10).0[3], 0);
+    }
+
+    #[test]
+    fn highlighter_is_even() {
+        let mut page = Page::new("p", PageSize::Custom([100.0, 100.0]));
+        page.paper = Color::TRANSPARENT;
+        page.elements.push(Element::Stroke(Stroke {
+            id: 1,
+            kind: InkKind::Highlighter,
+            color: Color::rgba(0, 0, 255, 128),
+            width: 20.0,
+            points: vec![
+                InkPoint::new(10.0, 50.0, 0.5),
+                InkPoint::new(50.0, 50.0, 0.5),
+                InkPoint::new(90.0, 50.0, 0.5),
+            ],
+        }));
+        let img = page_rgba(&page, &Assets::new(), &RenderOptions { scale: 1.0, ..Default::default() }).unwrap();
+        let a = img.get_pixel(30, 50)[3];
+        let b = img.get_pixel(50, 50)[3];
+        assert!(a.abs_diff(b) <= 2, "{a} vs {b}");
+    }
+}

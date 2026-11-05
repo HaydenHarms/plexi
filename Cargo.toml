@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/plexi-core", "crates/plexi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/HaydenHarms/plexi"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
