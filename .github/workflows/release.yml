@@ -44,10 +44,11 @@ jobs:
       - name: Smoke test the release exe
         shell: pwsh
         run: |
-          ./target/release/plexi.exe --version
+          # plexi.exe is a GUI-subsystem app, so the shell does not wait for it by itself.
           cargo run -q -p plexi-core --example demo -- demo.plexi
-          ./target/release/plexi.exe export demo.plexi demo.pdf
-          if (-not (Test-Path demo.pdf)) { throw "export failed" }
+          $p = Start-Process ./target/release/plexi.exe -ArgumentList 'export', 'demo.plexi', 'demo.pdf' -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0 -or -not (Test-Path demo.pdf)) { throw "export failed ($($p.ExitCode))" }
+          (Get-Item demo.pdf).Length
 
       - name: Portable builds
         shell: pwsh
