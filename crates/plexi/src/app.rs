@@ -1464,10 +1464,10 @@ mod tests {
     fn saving_round_trips() {
         let mut h = Harness::new();
         h.drag(PointerButton::Primary, &line(200.0, 600.0, 300.0));
-        let path = crate::config::data_dir().join("saved.plexi");
+        let path = std::env::temp_dir().join(format!("plexi-save-test-{}.plexi", std::process::id()));
         h.app.path = Some(path.clone());
         h.app.save();
-        for _ in 0..200 {
+        for _ in 0..1000 {
             h.step(vec![]);
             if !h.app.saving {
                 break;
@@ -1476,5 +1476,6 @@ mod tests {
         }
         let back = format::load(&path).unwrap();
         assert_eq!(back.pages[0].elements.len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 }
