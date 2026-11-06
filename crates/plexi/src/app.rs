@@ -34,7 +34,7 @@ impl Tool {
         match self {
             Tool::Pen => "Pen (P)",
             Tool::Highlighter => "Highlighter (H)",
-            Tool::Eraser => "Eraser (E) — right-drag erases with any tool",
+            Tool::Eraser => "Eraser (E) — middle-drag erases with any tool",
             Tool::Lasso => "Select (S) — lasso, drag to move, Del to delete",
             Tool::Text => "Text (T)",
             Tool::Shape(ShapeKind::Line) => "Line (L)",
@@ -205,6 +205,8 @@ pub struct PlexiApp {
     pub help_open: bool,
     pub toast: Option<Toast>,
     pub context_menu: Option<ContextMenu>,
+    /// The last scroll came from a trackpad (pans) rather than a mouse wheel (zooms).
+    pub trackpad_scroll: bool,
     /// Top-left of the canvas on screen, as of the last frame.
     pub canvas_origin: egui::Pos2,
     /// Bumped on every document change; caches keyed on it (sheet guides, export
@@ -259,6 +261,7 @@ impl PlexiApp {
             help_open: false,
             toast: None,
             context_menu: None,
+            trackpad_scroll: false,
             canvas_origin: egui::Pos2::ZERO,
             revision: 0,
             sheet_cache: None,
@@ -1542,8 +1545,8 @@ mod tests {
         assert_eq!(h.elements().len(), 1);
         let Element::Stroke(s) = &h.elements()[0] else { panic!("expected a stroke") };
         assert!(s.points.len() >= 2);
-        // Right-drag erases with any tool.
-        h.drag(PointerButton::Secondary, &[(400.0, 250.0), (400.0, 300.0), (400.0, 350.0)]);
+        // Middle-drag erases with any tool.
+        h.drag(PointerButton::Middle, &[(400.0, 250.0), (400.0, 300.0), (400.0, 350.0)]);
         assert!(h.elements().is_empty());
         h.app.undo();
         assert_eq!(h.elements().len(), 1);
@@ -1722,8 +1725,40 @@ mod tests {
         h.click(100.0, 600.0);
         assert!(h.app.context_menu.is_none());
         assert_eq!(h.elements().len(), 1);
-        h.drag(PointerButton::Secondary, &[(400.0, 250.0), (400.0, 300.0), (400.0, 350.0)]);
-        assert!(h.elements().is_empty());
+        // Right-drag pans instead of erasing.
+        let before = h.app.view.offset;
+        h.drag(PointerButton::Secondary, &[(400.0, 250.0), (420.0, 300.0), (440.0, 350.0)]);
+        assert_eq!(h.elements().len(), 1);
+        assert_eq!(h.app.view.offset - before, egui::vec2(40.0, 100.0));
+        assert!(h.app.context_menu.is_none(), "a right-drag doesn't open the menu");
+        let s = h.app.view.to_screen(h.app.canvas_origin, [300.0, 228.0]);
+        h.drag(PointerButton::Middle, &[(s.x, s.y - 50.0), (s.x, s.y), (s.x, s.y + 50.0)]);
+        assert!(h.elements().is_empty(), "middle-drag erases");
+    }
+
+    #[test]
+    fn the_mouse_wheel_zooms_at_the_pointer() {
+        let mut h = Harness::new();
+        let at = pos2(500.0, 400.0);
+        let origin = h.app.canvas_origin;
+        let before = h.app.view.to_page(origin, at);
+        let zoom = h.app.view.zoom;
+        let wheel = Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 3.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: Default::default(),
+        };
+        h.step(vec![Event::PointerMoved(at)]);
+        h.step(vec![wheel]);
+        for _ in 0..30 {
+            h.step(vec![]);
+        }
+        assert!(h.app.view.zoom > zoom * 1.2, "zoomed in: {} -> {}", zoom, h.app.view.zoom);
+        let after = h.app.view.to_page(origin, at);
+        let moved = (after[0] - before[0]).abs().max((after[1] - before[1]).abs());
+        assert!(moved < 0.5, "the point under the pointer stays put ({moved})");
     }
 
     #[test]
@@ -1756,7 +1791,8 @@ mod tests {
         let sheets = h.app.sheet_cache.as_ref().map(|c| c.3.len());
         assert_eq!(sheets, Some(2), "a second sheet appears where the ink went");
         h.app.open_export_dialog();
-        for _ in 0..200 {
+        // The first render loads system fonts, which is slow on CI runners.
+        for _ in 0..2000 {
             h.step(vec![]);
             let pv = &h.app.export.as_ref().unwrap().preview;
             if pv.ready() {

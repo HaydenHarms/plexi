@@ -47,11 +47,11 @@ Builds are not code-signed yet, so SmartScreen may warn the first time
 | Clear screen ink | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>X</kbd> (anywhere), <kbd>C</kbd> |
 | Back to the notebook | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> (anywhere), <kbd>N</kbd> |
 | Screenshot with ink → clipboard | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> while drawing on screen |
-| Pen, highlighter, eraser | <kbd>P</kbd> <kbd>H</kbd> <kbd>E</kbd>, or right-drag / pen barrel button to erase |
+| Pen, highlighter, eraser | <kbd>P</kbd> <kbd>H</kbd> <kbd>E</kbd>, or middle-drag / pen barrel button to erase |
 | Select (lasso), text | <kbd>S</kbd> <kbd>T</kbd> |
 | Line, arrow, rectangle, ellipse | <kbd>L</kbd> <kbd>A</kbd> <kbd>R</kbd> <kbd>O</kbd> (hold <kbd>Shift</kbd> to snap) |
 | Colors, width | <kbd>1</kbd>–<kbd>9</kbd>, <kbd>[</kbd> <kbd>]</kbd> |
-| Pan, zoom | scroll, <kbd>Space</kbd>+drag, two fingers · <kbd>Ctrl</kbd>+scroll, pinch |
+| Pan, zoom | right-drag, <kbd>Space</kbd>+drag, <kbd>Shift</kbd>+scroll, two fingers · scroll wheel, pinch |
 | Pages | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> new, <kbd>PgDn</kbd> / <kbd>PgUp</kbd>, trash button to delete (undoable) |
 | Images | paste or drop; drag a corner to resize (<kbd>Shift</kbd>: free) |
 | Lock an image, arrange, paper color | right-click |

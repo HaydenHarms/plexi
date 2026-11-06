@@ -403,8 +403,19 @@ impl PlexiApp {
 
     /// Pan and zoom from wheel, trackpad and two-finger touch.
     fn view_input(&mut self, ui: &Ui, rect: Rect, resp: &egui::Response) {
-        let (scroll, zoom, hover, multi) =
-            ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos(), i.multi_touch()));
+        let (scroll, zoom, hover, multi, shift) = ui.input(|i| {
+            (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos(), i.multi_touch(), i.modifiers.shift)
+        });
+        // A mouse wheel zooms; trackpad two-finger scrolling pans. Remember which one
+        // was used last, since smoothed scrolling keeps arriving after the events stop.
+        ui.input(|i| {
+            for e in &i.events {
+                if let Event::MouseWheel { source, .. } = e {
+                    self.trackpad_scroll =
+                        matches!(source, egui::MouseWheelSource::Trackpad | egui::MouseWheelSource::Momentum);
+                }
+            }
+        });
         if let Some(mt) = multi
             && mt.num_touches >= 2
         {
@@ -424,7 +435,13 @@ impl PlexiApp {
             self.view.zoom_around(rect.min, hover.unwrap_or(rect.center()), zoom);
         }
         if scroll != Vec2::ZERO {
-            self.view.offset += scroll;
+            if self.trackpad_scroll || shift {
+                // Shift+wheel pans, for mice without a comfortable right-drag.
+                self.view.offset += scroll;
+            } else {
+                let at = hover.unwrap_or(rect.center());
+                self.view.zoom_around(rect.min, at, ((scroll.y + scroll.x) / 300.0).exp());
+            }
         }
     }
 
@@ -550,12 +567,16 @@ impl PlexiApp {
         }
         let p = view.to_page(origin, pos);
         let notebook = matches!(self.mode, Mode::Notebook);
-        if notebook && (button == PointerButton::Middle || (button == PointerButton::Primary && space)) {
+        if notebook && button == PointerButton::Primary && space {
             self.interaction = Interaction::Pan { last: pos };
             return;
         }
         let tool = match button {
             PointerButton::Primary => self.tool,
+            // Middle-drag erases with any tool, and so does a pen's barrel button.
+            PointerButton::Middle => Tool::Eraser,
+            PointerButton::Secondary if self.pen_pressure.is_some() => Tool::Eraser,
+            // Right: drag to pan, click for the menu.
             PointerButton::Secondary => {
                 self.interaction = Interaction::RightPress { start: pos };
                 return;
@@ -636,8 +657,12 @@ impl PlexiApp {
             Interaction::Idle => {}
             Interaction::Ink(b) => b.push(time, p, self.pressure()),
             Interaction::RightPress { start } => {
-                if start.distance(pos) > 4.0 {
-                    // It's a drag: erase from where the button went down.
+                if start.distance(pos) > 4.0 && matches!(self.mode, Mode::Notebook) {
+                    // It's a drag: pan, counting from where the button went down.
+                    self.view.offset += pos - *start;
+                    inter = Interaction::Pan { last: pos };
+                } else if start.distance(pos) > 4.0 {
+                    // The screen overlay can't pan; a right-drag there erases.
                     self.pending_snapshot = Some(self.snapshot_of(t));
                     let r = self.config.eraser_size / 2.0 / view.zoom;
                     let from = view.to_page(origin, *start);
