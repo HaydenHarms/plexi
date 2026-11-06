@@ -1,5 +1,1 @@
-- [x] Add image cropping to right click menu
-- [x] Add a snipping tool feature
-- [x] Add selection of pages to print, e.g. 1,3,5
-- [x] Toggle page number/lining
-- [x] More text tools. Text boxes don't work well and you can't customize fonts in any way
+- [ ] Allow selecting multiple images holding shift
