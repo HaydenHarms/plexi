@@ -34,7 +34,7 @@ BEGIN
       VALUE "FileDescription", "Plexi"
       VALUE "FileVersion", "{version}"
       VALUE "InternalName", "plexi"
-      VALUE "LegalCopyright", "MIT License"
+      VALUE "LegalCopyright", "Copyright (c) 2026 Hayden Harms. All rights reserved."
       VALUE "OriginalFilename", "plexi.exe"
       VALUE "ProductName", "Plexi"
       VALUE "ProductVersion", "{version}"
