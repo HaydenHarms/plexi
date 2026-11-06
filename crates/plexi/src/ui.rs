@@ -339,7 +339,11 @@ fn color_and_width(app: &mut PlexiApp, ui: &mut Ui) {
 pub fn notebook(app: &mut PlexiApp, ui: &mut Ui, rect: Rect) {
     let th = theme(ui);
     let ctx = ui.ctx().clone();
-    app.canvas(ui, rect, Target::Page(app.page), th.canvas);
+    let bg = match app.doc.pages.get(app.page) {
+        Some(p) if app.config.paper_fills_canvas => crate::canvas::color32(p.paper),
+        _ => th.canvas,
+    };
+    app.canvas(ui, rect, Target::Page(app.page), bg);
 
     egui::Area::new(Id::unique("nb-toolbar"))
         .anchor(Align2::CENTER_TOP, vec2(0.0, 10.0))
@@ -378,7 +382,11 @@ pub fn notebook(app: &mut PlexiApp, ui: &mut Ui, rect: Rect) {
         .show(&ctx, |ui| {
             pill(ui).inner_margin(2).show(ui, |ui| {
                 let label = format!("{:.0}%", app.view.zoom * 100.0);
-                if ui.add(egui::Button::new(label).frame(false)).on_hover_text("Fit page (Ctrl+0)").clicked() {
+                if ui
+                    .add(egui::Button::new(label).frame(false).wrap_mode(egui::TextWrapMode::Extend))
+                    .on_hover_text("Fit page (Ctrl+0)")
+                    .clicked()
+                {
                     app.fit_pending = true;
                 }
             });
@@ -529,6 +537,8 @@ fn paper_colors(app: &mut PlexiApp, ui: &mut Ui, i: usize) {
             p.paper = c;
         }
     }
+    ui.checkbox(&mut app.config.paper_fills_canvas, "Use the paper color around the page too")
+        .on_hover_text("Fill the space outside fixed-size pages with the paper color");
 }
 
 fn set_paper(app: &mut PlexiApp, i: usize, c: Color) {

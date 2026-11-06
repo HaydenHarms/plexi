@@ -56,6 +56,8 @@ pub struct Config {
     pub new_page_size: PageSize,
     pub new_page_background: Background,
     pub new_page_paper: Color,
+    /// Paint the space around a fixed-size page in the page's paper color too.
+    pub paper_fills_canvas: bool,
     /// Outline the sheets that hold something on infinite pages.
     pub sheet_guides: bool,
     /// Sheet size for those outlines and the export default: an index into `PAPERS`.
@@ -105,6 +107,7 @@ impl Default for Config {
             new_page_size: PageSize::Infinite,
             new_page_background: Background::Blank,
             new_page_paper: Color::WHITE,
+            paper_fills_canvas: true,
             sheet_guides: true,
             sheet_paper: 0,
             sheet_landscape: false,
