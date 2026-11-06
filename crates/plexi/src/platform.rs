@@ -1,6 +1,9 @@
 //! Everything that talks to Win32 directly lives here: overlay window placement, screen
-//! capture, and attaching to the parent console for command-line use. Other platforms
-//! get inert fallbacks so the notebook still builds there.
+//! capture, and attaching to the parent console for command-line use.
+//!
+//! Elsewhere the native window handle is not used: the overlay is placed with viewport
+//! commands instead (see `PlexiApp::drive_overlay`), and on macOS screenshots go through
+//! `xcap` (`capture_main_screen`).
 
 /// A rectangle in physical screen pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +158,10 @@ mod imp {
     pub fn attach_parent_console() {
         let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
     }
+
+    pub fn capture_main_screen() -> Option<image::RgbaImage> {
+        cursor_monitor().and_then(capture)
+    }
 }
 
 #[cfg(not(windows))]
@@ -179,6 +186,20 @@ mod imp {
     }
     pub fn show_in_taskbar(_: isize, _: bool) {}
     pub fn attach_parent_console() {}
+
+    /// The primary display as straight RGBA. macOS asks for Screen Recording permission
+    /// the first time.
+    #[cfg(target_os = "macos")]
+    pub fn capture_main_screen() -> Option<image::RgbaImage> {
+        let monitors = xcap::Monitor::all().ok()?;
+        let main = monitors.iter().find(|m| m.is_primary().unwrap_or(false)).or(monitors.first())?;
+        main.capture_image().ok()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn capture_main_screen() -> Option<image::RgbaImage> {
+        None
+    }
 }
 
 pub use imp::*;

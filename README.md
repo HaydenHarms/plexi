@@ -35,9 +35,14 @@ Grab the latest build from [Releases](https://github.com/HaydenHarms/plexi/relea
 | `Plexi-x.y.z-portable.exe` | Nothing to install. Keeps its settings and autosaves in a `PlexiData` folder next to the exe. |
 | `Plexi-x.y.z-portable.zip` | The portable build in a folder (handy for USB sticks). |
 | `Plexi-x.y.z-x64.msi` | All-users MSI for managed PCs. |
+| `Plexi-x.y.z-macos.dmg` | macOS 11+ (Apple silicon and Intel). Open it and drag Plexi to Applications. |
+| `Plexi-x.y.z-macos.zip` | The same Mac app, zipped. |
 
-Builds are not code-signed yet, so SmartScreen may warn the first time
-(**More info → Run anyway**).
+Builds are not code-signed yet, so Windows SmartScreen may warn the first time
+(**More info → Run anyway**). On a Mac, right-click Plexi → **Open** the first time, and
+allow Screen Recording if you want screenshots from draw-on-screen mode. On macOS the
+hotkeys are <kbd>Control</kbd>+<kbd>Option</kbd>+<kbd>D</kbd> / <kbd>X</kbd> / <kbd>N</kbd>,
+and draw-on-screen covers the main display.
 
 ## Using it
 

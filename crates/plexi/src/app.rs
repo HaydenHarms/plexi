@@ -77,6 +77,8 @@ pub enum Mode {
 #[derive(Clone, Copy, Debug)]
 struct NotebookGeometry {
     rect: Option<PxRect>,
+    /// Outer position and inner size in points, for platforms without `rect`.
+    outer: Option<(egui::Pos2, egui::Vec2)>,
     maximized: bool,
 }
 
@@ -975,7 +977,12 @@ impl PlexiApp {
             return;
         }
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-        self.notebook_geometry = Some(NotebookGeometry { rect: self.hwnd.and_then(platform::window_rect), maximized });
+        let outer = ctx.input(|i| {
+            let v = i.viewport();
+            v.outer_rect.zip(v.inner_rect).map(|(o, inner)| (o.min, inner.size()))
+        });
+        self.notebook_geometry =
+            Some(NotebookGeometry { rect: self.hwnd.and_then(platform::window_rect), outer, maximized });
         if maximized {
             ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
         }
@@ -1034,9 +1041,13 @@ impl PlexiApp {
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
         ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
         let geom = self.notebook_geometry.take();
-        match geom.and_then(|g| g.rect) {
-            Some(r) => self.restore_rect = Some((r, 3)),
-            None => ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(1040.0, 760.0))),
+        match (geom.and_then(|g| g.rect), geom.and_then(|g| g.outer)) {
+            (Some(r), _) => self.restore_rect = Some((r, 3)),
+            (None, Some((pos, size))) => {
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
+            }
+            (None, None) => ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(1040.0, 760.0))),
         }
         if geom.is_some_and(|g| g.maximized) {
             ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
@@ -1054,19 +1065,31 @@ impl PlexiApp {
     }
 
     pub fn request_snapshot(&mut self, action: SnapshotAction) {
-        if let (Mode::Overlay(o), Some(h)) = (&mut self.mode, self.hwnd) {
-            platform::exclude_from_capture(h, true);
+        if let Mode::Overlay(o) = &mut self.mode {
+            // Windows can leave the overlay out of the capture; elsewhere the overlay
+            // draws nothing for a few frames instead (see `hide_for_capture`).
+            if let Some(h) = self.hwnd {
+                platform::exclude_from_capture(h, true);
+            }
             o.snapshot = Some((action, 3));
         }
     }
 
+    /// The overlay must paint nothing this frame because a screenshot is coming up and
+    /// the platform can't exclude our window from it.
+    pub fn hide_for_capture(&self) -> bool {
+        self.hwnd.is_none() && matches!(&self.mode, Mode::Overlay(o) if o.snapshot.is_some())
+    }
+
     /// Advance multi-frame overlay work: window placement and screenshots.
     fn drive_overlay(&mut self, ctx: &Context) {
-        let Some(h) = self.hwnd else { return };
+        let hwnd = self.hwnd;
         let Mode::Overlay(o) = &mut self.mode else {
             if let Some((r, n)) = self.restore_rect.take() {
                 if n == 0 {
-                    platform::place_normal(h, r);
+                    if let Some(h) = hwnd {
+                        platform::place_normal(h, r);
+                    }
                     self.fit_pending = true;
                 } else {
                     self.restore_rect = Some((r, n - 1));
@@ -1078,10 +1101,19 @@ impl PlexiApp {
         if o.place_in > 0 {
             o.place_in -= 1;
             if o.place_in == 0 {
-                platform::show_in_taskbar(h, false);
+                match hwnd {
+                    Some(h) => platform::show_in_taskbar(h, false),
+                    None => {
+                        // No native handle (macOS): cover the main display with viewport commands.
+                        if let Some(size) = ctx.input(|i| i.viewport().monitor_size) {
+                            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::Pos2::ZERO));
+                            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+                        }
+                    }
+                }
             }
             ctx.request_repaint();
-        } else if let Some(m) = o.monitor {
+        } else if let (Some(h), Some(m)) = (hwnd, o.monitor) {
             // Keep exactly covering the monitor; DPI changes can resize us behind our back.
             if platform::window_rect(h) != Some(m) {
                 platform::place_topmost(h, m, !o.passthrough);
@@ -1105,9 +1137,14 @@ impl PlexiApp {
                 return;
             }
             o.snapshot = None;
-            let monitor = o.monitor.or_else(|| platform::window_monitor(h));
-            let shot = monitor.and_then(platform::capture);
-            platform::exclude_from_capture(h, false);
+            let shot = match hwnd {
+                Some(h) => {
+                    let shot = o.monitor.or_else(|| platform::window_monitor(h)).and_then(platform::capture);
+                    platform::exclude_from_capture(h, false);
+                    shot
+                }
+                None => platform::capture_main_screen(),
+            };
             match shot {
                 Some(img) => self.finish_snapshot(ctx, action, img),
                 None => self.toast_error("Couldn't capture the screen"),
@@ -1440,11 +1477,15 @@ impl eframe::App for PlexiApp {
         self.handle_drops_and_paste(&ctx);
 
         let rect = ui.max_rect();
+        let hidden = self.hide_for_capture();
         match self.mode.clone() {
             Mode::Notebook => crate::ui::notebook(self, ui, rect),
+            Mode::Overlay(_) if hidden => ctx.request_repaint(),
             Mode::Overlay(o) => crate::ui::overlay(self, ui, rect, &o),
         }
-        crate::ui::dialogs(self, &ctx);
+        if !hidden {
+            crate::ui::dialogs(self, &ctx);
+        }
         self.shortcuts(&ctx);
         self.autosave();
         self.update_title(&ctx);
