@@ -2,7 +2,7 @@
 name = "plexi"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 description = "Draw and take notes anywhere, right on top of your screen"
 
 [dependencies]

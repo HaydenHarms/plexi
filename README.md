@@ -104,4 +104,4 @@ Releases: bump `version` in the root `Cargo.toml`, then push a tag `vX.Y.Z`.
 
 ## License
 
-MIT
+Copyright (c) 2026 Hayden Harms. All rights reserved. See [LICENSE](LICENSE).
