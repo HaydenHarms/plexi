@@ -9,6 +9,8 @@ mod cli;
 mod config;
 mod history;
 mod platform;
+#[cfg(test)]
+mod reel;
 mod shell;
 mod ui;
 mod updater;

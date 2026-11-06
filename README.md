@@ -24,7 +24,7 @@ screen into a sheet of glass you draw on. Written in Rust.
   HTML, Markdown with images, plain text, Excalidraw, draw.io, InkML and JSON, with a live
   preview and your choice of paper size, orientation, margins and pixel size.
 
-<p align="center"><img src="docs/export-sample.png" width="420" alt="A page of handwritten notes exported from Plexi"></p>
+<p align="center"><img src="docs/tour.gif" width="720" alt="A tour of Plexi: handwriting, images, zooming the endless page, paper colors and export"></p>
 
 ## Download
 
