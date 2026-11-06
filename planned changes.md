@@ -1,0 +1,2 @@
+- [ ] Fix weird zoom stacking in zoom percent.png
+- [ ] background color only effects the paper and not the infinite space around. Please fix or at least have some sort of option for that
