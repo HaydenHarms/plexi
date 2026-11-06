@@ -1,1 +1,2 @@
 - [ ] Allow selecting multiple images holding shift
+- [ ] Allow dynamic resizing, only keep ratio when holding shift
