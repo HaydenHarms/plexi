@@ -64,6 +64,14 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\plexi.exe"; Description: "{cm:LaunchProgram,Plexi}"; Flags: nowait postinstall skipifsilent
+; Plexi's updater runs this installer silently with /relaunch=1 and expects Plexi back.
+Filename: "{app}\plexi.exe"; Flags: nowait; Check: ShouldRelaunch
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/C taskkill /IM plexi.exe /F"; Flags: runhidden; RunOnceId: "StopPlexi"
+
+[Code]
+function ShouldRelaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;

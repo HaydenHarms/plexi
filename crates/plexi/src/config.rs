@@ -70,6 +70,10 @@ pub struct Config {
     /// Keep overlay ink when leaving overlay mode.
     pub keep_overlay_ink: bool,
     pub autosave: bool,
+    /// Look for a newer release on GitHub when Plexi starts.
+    pub check_updates: bool,
+    /// A release the user chose to skip; not offered again on startup.
+    pub skipped_version: Option<String>,
 }
 
 impl Default for Config {
@@ -109,6 +113,8 @@ impl Default for Config {
             hotkey_notebook: "Ctrl+Alt+N".into(),
             keep_overlay_ink: true,
             autosave: true,
+            check_updates: true,
+            skipped_version: None,
         }
     }
 }

@@ -743,6 +743,7 @@ enum Cmd {
     Duplicate,
     PartialEraser,
     Settings,
+    CheckUpdates,
     Shortcuts,
     Quit,
 }
@@ -777,6 +778,7 @@ fn commands(app: &PlexiApp) -> Vec<(Cmd, String, String)> {
             String::new(),
         ),
         (Cmd::Settings, "Settings".into(), "Ctrl+,".into()),
+        (Cmd::CheckUpdates, "Check for updates".into(), String::new()),
         (Cmd::Shortcuts, "Keyboard shortcuts".into(), "F1".into()),
         (Cmd::Quit, "Quit Plexi".into(), String::new()),
     ];
@@ -860,6 +862,7 @@ fn run_cmd(app: &mut PlexiApp, ctx: &Context, cmd: Cmd) {
         Cmd::Duplicate => app.duplicate_selection(),
         Cmd::PartialEraser => app.config.eraser_partial = !app.config.eraser_partial,
         Cmd::Settings => app.settings_open = true,
+        Cmd::CheckUpdates => app.check_for_updates(ctx, true),
         Cmd::Shortcuts => app.help_open = true,
         Cmd::Quit => {
             app.quit_requested = true;
@@ -1387,6 +1390,7 @@ fn context_menu(app: &mut PlexiApp, ctx: &Context) {
 
 fn settings_window(app: &mut PlexiApp, ctx: &Context) {
     let mut open = app.settings_open;
+    let mut check_now = false;
     egui::Window::new("Settings").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
         let c = &mut app.config;
         ui.heading("Ink");
@@ -1414,6 +1418,12 @@ fn settings_window(app: &mut PlexiApp, ctx: &Context) {
         ui.separator();
         ui.heading("Files");
         ui.checkbox(&mut c.autosave, "Save automatically");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut c.check_updates, "Check for updates when Plexi starts");
+            if ui.button("Check now").clicked() {
+                check_now = true;
+            }
+        });
         let dir = crate::config::data_dir();
         ui.horizontal(|ui| {
             ui.label(if crate::config::is_portable() {
@@ -1428,6 +1438,9 @@ fn settings_window(app: &mut PlexiApp, ctx: &Context) {
         });
         ui.weak(format!("Plexi {}", env!("CARGO_PKG_VERSION")));
     });
+    if check_now {
+        app.check_for_updates(ctx, true);
+    }
     if !open && app.settings_open {
         app.config.save();
     }
@@ -1492,7 +1505,75 @@ fn toast(app: &mut PlexiApp, ctx: &Context) {
         });
 }
 
+/// The "new version" notice in the bottom-right corner of the notebook.
+fn update_notice(app: &mut PlexiApp, ctx: &Context) {
+    use crate::app::UpdateState;
+    if !matches!(app.mode, Mode::Notebook) {
+        return;
+    }
+    let state = app.update.clone();
+    let (release, failed) = match &state {
+        UpdateState::Available(r) => (r, None),
+        UpdateState::Downloading(r, _) => (r, None),
+        UpdateState::Failed(r, e) => (r, Some(e.as_str())),
+        _ => return,
+    };
+    let self_update = crate::updater::install_kind() != crate::updater::InstallKind::Manual;
+    egui::Area::new(Id::unique("update-notice"))
+        .anchor(Align2::RIGHT_BOTTOM, vec2(-12.0, -60.0))
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            pill(ui).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+                ui.set_max_width(300.0);
+                ui.strong(format!("Plexi {} is available", release.version));
+                match (&state, failed) {
+                    (UpdateState::Downloading(_, p), _) => {
+                        ui.add(egui::ProgressBar::new(*p).desired_width(260.0).text("Downloading…"));
+                    }
+                    (_, Some(e)) => {
+                        ui.colored_label(Color32::from_rgb(0xd6, 0x3a, 0x3a), format!("Update failed: {e}"));
+                        ui.horizontal(|ui| {
+                            if ui.button("Try again").clicked() {
+                                app.install_update(ctx);
+                            }
+                            if ui.button("Download page").clicked() {
+                                crate::app::open_url(&release.page);
+                            }
+                            if ui.button("Close").clicked() {
+                                app.update = UpdateState::Idle;
+                            }
+                        });
+                    }
+                    _ => {
+                        ui.weak(if self_update {
+                            "Plexi saves your notes, installs it and restarts."
+                        } else {
+                            "Opens the download page."
+                        });
+                        ui.horizontal(|ui| {
+                            let label = if self_update { "Update now" } else { "Download" };
+                            let go = egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(ACCENT);
+                            if ui.add(go).clicked() {
+                                app.install_update(ctx);
+                            }
+                            if ui.button("Later").clicked() {
+                                app.update = UpdateState::Idle;
+                            }
+                            if ui.button("Skip this version").clicked() {
+                                app.skip_update();
+                            }
+                        });
+                        if ui.link("What's new").clicked() {
+                            crate::app::open_url(&release.page);
+                        }
+                    }
+                }
+            });
+        });
+}
+
 pub fn dialogs(app: &mut PlexiApp, ctx: &Context) {
+    update_notice(app, ctx);
     context_menu(app, ctx);
     palette(app, ctx);
     export_window(app, ctx);

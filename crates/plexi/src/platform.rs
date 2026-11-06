@@ -205,11 +205,17 @@ mod imp {
 pub use imp::*;
 
 /// The native window handle behind eframe's window, as an integer.
+#[cfg(windows)]
 pub fn native_handle(frame: &eframe::Frame) -> Option<isize> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     match frame.window_handle().ok()?.as_raw() {
-        #[cfg(windows)]
         RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
         _ => None,
     }
+}
+
+/// Only Windows uses the native handle; other platforms place windows through egui.
+#[cfg(not(windows))]
+pub fn native_handle(_: &eframe::Frame) -> Option<isize> {
+    None
 }

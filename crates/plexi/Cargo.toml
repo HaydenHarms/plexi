@@ -18,7 +18,9 @@ raw-window-handle = { version = "0.6", default-features = false }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.1"
 tray-icon = "0.26.1"
+ureq = "3.5.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 xcap = { version = "0.9.8", default-features = false }

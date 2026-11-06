@@ -18,6 +18,7 @@ use crate::config::{self, Config};
 use crate::history::{History, Snapshot, Target};
 use crate::platform::{self, PxRect};
 use crate::shell::{Shell, ShellEvent};
+use crate::updater::{self, InstallKind, Release};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -171,6 +172,21 @@ pub struct StartOptions {
 enum Job {
     Saved(PathBuf, Result<(), String>),
     Exported(Result<Vec<PathBuf>, String>),
+    UpdateChecked { manual: bool, result: Result<Option<Release>, String> },
+    UpdateProgress(f32),
+    UpdateDownloaded(Result<PathBuf, String>),
+}
+
+/// Where the update check and install stand.
+#[derive(Clone, Debug, Default)]
+pub enum UpdateState {
+    #[default]
+    Idle,
+    Checking,
+    /// A newer release; shown as a notice until acted on or dismissed.
+    Available(Release),
+    Downloading(Release, f32),
+    Failed(Release, String),
 }
 
 pub struct PlexiApp {
@@ -207,6 +223,7 @@ pub struct PlexiApp {
     pub help_open: bool,
     pub toast: Option<Toast>,
     pub context_menu: Option<ContextMenu>,
+    pub update: UpdateState,
     /// The last scroll came from a trackpad (pans) rather than a mouse wheel (zooms).
     pub trackpad_scroll: bool,
     /// Top-left of the canvas on screen, as of the last frame.
@@ -225,6 +242,8 @@ pub struct PlexiApp {
     last_title: String,
     start: Option<StartOptions>,
     pub quit_requested: bool,
+    /// An update is installing; close the window on the next frame.
+    update_quit: bool,
 }
 
 impl PlexiApp {
@@ -263,6 +282,7 @@ impl PlexiApp {
             help_open: false,
             toast: None,
             context_menu: None,
+            update: UpdateState::Idle,
             trackpad_scroll: false,
             canvas_origin: egui::Pos2::ZERO,
             revision: 0,
@@ -276,8 +296,13 @@ impl PlexiApp {
             last_title: String::new(),
             start: None,
             quit_requested: false,
+            update_quit: false,
         };
         if start.shell {
+            updater::clean_up_after_update();
+            if app.config.check_updates {
+                app.check_for_updates(&cc.egui_ctx, false);
+            }
             let shell = Shell::start(&cc.egui_ctx, &app.config);
             if !shell.failed_hotkeys.is_empty() {
                 app.toast_error(format!("Hotkey already in use by another app: {}", shell.failed_hotkeys.join(", ")));
@@ -570,8 +595,103 @@ impl PlexiApp {
                     self.toast(format!("Exported {first}{more}"));
                 }
                 Job::Exported(Err(e)) => self.toast_error(format!("Export failed: {e}")),
+                Job::UpdateChecked { manual, result } => {
+                    self.update = UpdateState::Idle;
+                    match result {
+                        Ok(Some(r)) if manual || self.config.skipped_version.as_deref() != Some(&r.version) => {
+                            self.update = UpdateState::Available(r);
+                        }
+                        Ok(_) if manual => {
+                            self.toast(format!("Plexi {} is the latest version", env!("CARGO_PKG_VERSION")))
+                        }
+                        Err(e) if manual => self.toast_error(format!("Couldn't check for updates: {e}")),
+                        _ => {} // quiet on startup: offline is fine
+                    }
+                }
+                Job::UpdateProgress(f) => {
+                    if let UpdateState::Downloading(_, p) = &mut self.update {
+                        *p = f;
+                    }
+                }
+                Job::UpdateDownloaded(result) => {
+                    let UpdateState::Downloading(release, _) = std::mem::take(&mut self.update) else { continue };
+                    let applied = result.and_then(|path| {
+                        // Everything is on disk before the installer or new exe takes over.
+                        self.finish_text_edit();
+                        self.flush_save();
+                        if self.path.is_some() {
+                            self.config.last_file = self.path.clone();
+                        }
+                        self.config.save();
+                        updater::apply(updater::install_kind(), &path)
+                    });
+                    match applied {
+                        Ok(()) => {
+                            self.quit_requested = true;
+                            self.update_quit = true;
+                        }
+                        Err(e) => self.update = UpdateState::Failed(release, e),
+                    }
+                }
             }
         }
+    }
+
+    // ----- updates ---------------------------------------------------------------
+
+    /// Ask GitHub for a newer release in the background. A startup check (`manual` off)
+    /// waits a moment so it never competes with opening the window, and stays quiet
+    /// when offline or up to date.
+    pub fn check_for_updates(&mut self, ctx: &Context, manual: bool) {
+        if matches!(self.update, UpdateState::Checking | UpdateState::Downloading(..)) {
+            return;
+        }
+        self.update = UpdateState::Checking;
+        let (tx, ctx) = (self.jobs_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            if !manual {
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            let _ = tx.send(Job::UpdateChecked { manual, result: updater::check() });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Download and install the offered release, or open its page when this copy can't
+    /// update itself (MSI installs, macOS).
+    pub fn install_update(&mut self, ctx: &Context) {
+        let release = match &self.update {
+            UpdateState::Available(r) | UpdateState::Failed(r, _) => r.clone(),
+            _ => return,
+        };
+        let kind = updater::install_kind();
+        if kind == InstallKind::Manual {
+            open_url(&release.page);
+            self.update = UpdateState::Idle;
+            return;
+        }
+        self.update = UpdateState::Downloading(release.clone(), 0.0);
+        let (tx, ctx) = (self.jobs_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let mut last = 0.0;
+            let result = updater::download(&release, kind, |f| {
+                if f - last >= 0.01 {
+                    last = f;
+                    let _ = tx.send(Job::UpdateProgress(f));
+                    ctx.request_repaint();
+                }
+            });
+            let _ = tx.send(Job::UpdateDownloaded(result));
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn skip_update(&mut self) {
+        if let UpdateState::Available(r) = &self.update {
+            self.config.skipped_version = Some(r.version.clone());
+            self.config.save();
+        }
+        self.update = UpdateState::Idle;
     }
 
     // ----- export ----------------------------------------------------------------
@@ -1472,6 +1592,9 @@ impl eframe::App for PlexiApp {
             }
         }
         self.poll_jobs();
+        if self.update_quit {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
         self.handle_shell_events(&ctx);
         self.drive_overlay(&ctx);
         self.handle_drops_and_paste(&ctx);
@@ -1513,6 +1636,18 @@ impl eframe::App for PlexiApp {
         }
         self.config.save();
     }
+}
+
+/// Open a web page in the default browser.
+pub fn open_url(url: &str) {
+    let opener = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(opener).arg(url).spawn();
 }
 
 #[cfg(test)]

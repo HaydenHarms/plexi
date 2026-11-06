@@ -11,6 +11,7 @@ mod history;
 mod platform;
 mod shell;
 mod ui;
+mod updater;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

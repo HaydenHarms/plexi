@@ -18,7 +18,8 @@ screen into a sheet of glass you draw on. Written in Rust.
 - **Almost no UI.** One floating toolbar. Everything else is a shortcut or
   <kbd>Ctrl</kbd>+<kbd>K</kbd> away.
 - **Opens in a blink, saves on its own.** A single small exe; notes autosave and reopen
-  where you left off.
+  where you left off. New versions are offered on launch and install with one click
+  (checked against the release's checksums; turn it off in Settings).
 - **Exports to everything:** PDF (vector, multi-page), PNG, JPEG, WebP, BMP, TIFF, SVG,
   HTML, Markdown with images, plain text, Excalidraw, draw.io, InkML and JSON, with a live
   preview and your choice of paper size, orientation, margins and pixel size.
