@@ -1,1 +1,3 @@
 - [ ] Add image cropping to right click menu
+- [ ] Add a snipping tool feature
+- [ ] Add selection of pages to print, e.g. 1,3,5
