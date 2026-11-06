@@ -7,6 +7,7 @@ mod app;
 mod canvas;
 mod cli;
 mod config;
+mod fonts;
 mod history;
 mod platform;
 #[cfg(test)]

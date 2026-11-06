@@ -124,6 +124,34 @@ pub fn frames(page: &Page, layout: &Layout) -> Vec<Frame> {
     vec![Frame { view: Rect::from_min_size([c[0] - vw / 2.0, top], [vw, vh]), size: [w, h] }]
 }
 
+/// Parse a page list like `1, 3, 5-7` (1-based, as people count pages) into sorted
+/// 0-based indices below `count`.
+pub fn parse_page_list(text: &str, count: usize) -> Result<Vec<usize>, String> {
+    let mut out = std::collections::BTreeSet::new();
+    for part in text.split([',', ';', ' ']).map(str::trim).filter(|p| !p.is_empty()) {
+        let num = |s: &str| -> Result<usize, String> {
+            s.trim().parse::<usize>().map_err(|_| format!("“{part}” isn't a page number"))
+        };
+        let (a, b) = match part.split_once(['-', '–']) {
+            Some((a, b)) if a.trim().is_empty() => (1, num(b)?),
+            Some((a, b)) if b.trim().is_empty() => (num(a)?, count),
+            Some((a, b)) => (num(a)?, num(b)?),
+            None => (num(part)?, num(part)?),
+        };
+        if a == 0 || b == 0 {
+            return Err("Pages start at 1".into());
+        }
+        if a.max(b) > count {
+            return Err(format!("There {} only {count}", if count == 1 { "is" } else { "are" }));
+        }
+        out.extend(a.min(b) - 1..a.max(b));
+    }
+    if out.is_empty() {
+        return Err("Type page numbers, e.g. 1, 3, 5-7".into());
+    }
+    Ok(out.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +166,18 @@ mod tests {
             color: Color::BLACK,
             width: 0.0,
         })
+    }
+
+    #[test]
+    fn page_lists_parse() {
+        assert_eq!(parse_page_list("1,3,5", 6), Ok(vec![0, 2, 4]));
+        assert_eq!(parse_page_list(" 2-4, 1 ", 6), Ok(vec![0, 1, 2, 3]));
+        assert_eq!(parse_page_list("5-", 6), Ok(vec![4, 5]));
+        assert_eq!(parse_page_list("4-2", 6), Ok(vec![1, 2, 3]));
+        assert!(parse_page_list("7", 6).is_err());
+        assert!(parse_page_list("0", 6).is_err());
+        assert!(parse_page_list("two", 6).is_err());
+        assert!(parse_page_list("", 6).is_err());
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub enum ShellEvent {
     ToggleDraw,
     ClearOverlay,
     ShowNotebook,
+    Snip,
     Quit,
 }
 
@@ -54,6 +55,7 @@ impl Shell {
                 (&cfg.hotkey_draw, ShellEvent::ToggleDraw),
                 (&cfg.hotkey_clear, ShellEvent::ClearOverlay),
                 (&cfg.hotkey_notebook, ShellEvent::ShowNotebook),
+                (&cfg.hotkey_snip, ShellEvent::Snip),
             ] {
                 match parse_hotkey(text) {
                     Some(hk) if mgr.register(hk).is_ok() => bound.push((hk.id(), ev)),
@@ -80,9 +82,10 @@ fn build_tray(ctx: &egui::Context, tx: Sender<ShellEvent>, cfg: &crate::config::
     let draw = MenuItem::with_id("draw", format!("Draw on screen\t{}", cfg.hotkey_draw), true, None);
     let clear = MenuItem::with_id("clear", format!("Clear screen ink\t{}", cfg.hotkey_clear), true, None);
     let notebook = MenuItem::with_id("notebook", format!("Open notebook\t{}", cfg.hotkey_notebook), true, None);
+    let snip = MenuItem::with_id("snip", format!("Snip an area\t{}", cfg.hotkey_snip), true, None);
     let quit = MenuItem::with_id("quit", "Quit Plexi", true, None);
     let menu = Menu::new();
-    menu.append_items(&[&draw, &clear, &notebook, &PredefinedMenuItem::separator(), &quit]).ok()?;
+    menu.append_items(&[&draw, &snip, &clear, &notebook, &PredefinedMenuItem::separator(), &quit]).ok()?;
 
     {
         let (tx, ctx) = (tx.clone(), ctx.clone());
@@ -91,6 +94,7 @@ fn build_tray(ctx: &egui::Context, tx: Sender<ShellEvent>, cfg: &crate::config::
                 "draw" => ShellEvent::ToggleDraw,
                 "clear" => ShellEvent::ClearOverlay,
                 "notebook" => ShellEvent::ShowNotebook,
+                "snip" => ShellEvent::Snip,
                 "quit" => ShellEvent::Quit,
                 _ => return,
             };

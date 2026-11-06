@@ -18,7 +18,7 @@ pub fn pages_pdf(title: &str, pages: &[&Page], assets: &Assets, opts: &RenderOpt
     let mut pdf = Pdf::new();
     let mut kids = Vec::new();
 
-    for (page, frame) in pages.iter().flat_map(|p| opts.frames(p).into_iter().map(move |f| (*p, f))) {
+    for (page, frame) in opts.outputs(pages) {
         let tree = parse_svg(&svg::frame_svg(page, assets, opts, &frame))?;
         let (chunk, svg_id) = svg2pdf::to_chunk(&tree, svg2pdf::ConversionOptions::default())
             .map_err(|e| ExportError::Pdf(e.to_string()))?;

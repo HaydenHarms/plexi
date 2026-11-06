@@ -11,7 +11,7 @@ use plexi_core::export::ExportFormat;
 use plexi_core::export::layout::{Area, Frame as OutFrame, PAPERS};
 use plexi_core::{Background, Color, Element, PAPER_COLORS, PageSize, ShapeKind};
 
-use crate::app::{ExportScope, Mode, Overlay, PaperChoice, PlexiApp, SnapshotAction, Tool};
+use crate::app::{ExportScope, Mode, Overlay, PaperChoice, PlexiApp, SnapshotAction, Snip, SnipFrom, Tool};
 use crate::canvas::color32;
 use crate::history::Target;
 
@@ -91,6 +91,7 @@ pub enum Icon {
     Left,
     Right,
     Notebook,
+    Snip,
 }
 
 fn tool_icon(t: Tool) -> Icon {
@@ -215,6 +216,13 @@ pub fn paint_icon(p: &Painter, r: Rect, icon: Icon, c: Color32) {
             line(&[(8.0, 5.5), (11.5, 5.5)]);
             line(&[(8.0, 8.5), (11.5, 8.5)]);
         }
+        Icon::Snip => {
+            // Scissors.
+            p.circle_stroke(at(4.5, 11.5), 2.3 * s, st);
+            p.circle_stroke(at(11.5, 11.5), 2.3 * s, st);
+            line(&[(6.2, 9.8), (12.5, 2.0)]);
+            line(&[(9.8, 9.8), (3.5, 2.0)]);
+        }
     }
 }
 
@@ -308,6 +316,119 @@ fn tool_buttons(app: &mut PlexiApp, ui: &mut Ui, overlay: bool) {
     }
 }
 
+/// Text sizes offered by the size menu and stepped through by A− / A+.
+const TEXT_SIZES: [f32; 14] = [10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 28.0, 32.0, 40.0, 48.0, 64.0, 80.0, 120.0];
+
+/// A second bar under the toolbar with the text controls, while there is text to style:
+/// the text tool is out, a box is being edited, or text is selected.
+fn text_bar(app: &mut PlexiApp, ctx: &Context, y: f32) {
+    let text = app.tool == Tool::Text || app.editing_text.is_some() || (app.tool == Tool::Lasso && app.text_selected());
+    if !text {
+        return;
+    }
+    egui::Area::new(Id::unique("text-bar")).anchor(Align2::CENTER_TOP, vec2(0.0, y)).order(Order::Foreground).show(
+        ctx,
+        |ui| {
+            pill(ui).inner_margin(2).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                    text_controls(app, ui);
+                });
+            });
+        },
+    );
+}
+
+/// Font, size and style for text: the box being edited, the selected boxes, or new ones.
+fn text_controls(app: &mut PlexiApp, ui: &mut Ui) {
+    let style = app.text_style();
+    let name = style.font.clone().unwrap_or_else(|| "Default font".into());
+    let short: String =
+        if name.chars().count() > 16 { format!("{}…", name.chars().take(15).collect::<String>()) } else { name };
+    let font = ui.add(egui::Button::new(short).frame(false).min_size(vec2(0.0, 34.0))).on_hover_text("Font");
+    egui::Popup::menu(&font).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        font_menu(app, ui, style.font.as_deref());
+    });
+    vsep(ui);
+    let step = |dir: f32| {
+        let s = style.size;
+        if dir > 0.0 {
+            TEXT_SIZES.into_iter().find(|v| *v > s + 0.01).unwrap_or(s)
+        } else {
+            TEXT_SIZES.into_iter().rev().find(|v| *v < s - 0.01).unwrap_or(s)
+        }
+    };
+    if ui.add(egui::Button::new("A−").frame(false).min_size(vec2(26.0, 34.0))).on_hover_text("Smaller").clicked() {
+        let v = step(-1.0);
+        app.apply_text_style(|t| t.size = v);
+    }
+    let size = ui.add(egui::Button::new(format!("{:.0}", style.size)).frame(false).min_size(vec2(26.0, 34.0)));
+    egui::Popup::menu(&size.on_hover_text("Text size")).show(|ui| {
+        for v in TEXT_SIZES {
+            if ui.selectable_label((style.size - v).abs() < 0.01, format!("{v:.0}")).clicked() {
+                app.apply_text_style(|t| t.size = v);
+                ui.close();
+            }
+        }
+    });
+    if ui.add(egui::Button::new("A+").frame(false).min_size(vec2(26.0, 34.0))).on_hover_text("Bigger").clicked() {
+        let v = step(1.0);
+        app.apply_text_style(|t| t.size = v);
+    }
+    vsep(ui);
+    let (has_bold, has_italic) = app.fonts.styles(style.font.as_deref());
+    let toggle = |ui: &mut Ui, on: bool, enabled: bool, text: egui::RichText, tip: &str| {
+        let b = egui::Button::selectable(on, text).min_size(vec2(28.0, 28.0));
+        let r = ui.add_enabled(enabled || on, b);
+        if enabled {
+            r.on_hover_text(tip)
+        } else {
+            r.on_disabled_hover_text("This font has no such style — pick another font")
+        }
+    };
+    if toggle(ui, style.bold, has_bold, egui::RichText::new("B").strong(), "Bold").clicked() {
+        let v = !style.bold;
+        app.apply_text_style(|t| t.bold = v);
+    }
+    if toggle(ui, style.italic, has_italic, egui::RichText::new("I").italics(), "Italic").clicked() {
+        let v = !style.italic;
+        app.apply_text_style(|t| t.italic = v);
+    }
+    if toggle(ui, style.underline, true, egui::RichText::new("U").underline(), "Underline").clicked() {
+        let v = !style.underline;
+        app.apply_text_style(|t| t.underline = v);
+    }
+}
+
+fn font_menu(app: &mut PlexiApp, ui: &mut Ui, current: Option<&str>) {
+    ui.set_min_width(230.0);
+    let mut pick: Option<Option<String>> = None;
+    if ui.selectable_label(current.is_none(), "Default font").on_hover_text("Ubuntu Light, built into Plexi").clicked()
+    {
+        pick = Some(None);
+    }
+    let families = app.fonts.families();
+    for f in &families.0 {
+        if ui.selectable_label(current == Some(f.as_str()), f).clicked() {
+            pick = Some(Some(f.clone()));
+        }
+    }
+    ui.separator();
+    ui.add(egui::TextEdit::singleline(&mut app.fonts.search).hint_text("Search all fonts…").desired_width(220.0));
+    let q = app.fonts.search.to_lowercase();
+    egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+        for f in families.0.iter().chain(&families.1).filter(|f| q.is_empty() || f.to_lowercase().contains(&q)) {
+            if ui.selectable_label(current == Some(f.as_str()), f).clicked() {
+                pick = Some(Some(f.clone()));
+            }
+        }
+    });
+    if let Some(f) = pick {
+        app.apply_text_style(|t| t.font = f.clone());
+        ui.close();
+    }
+}
+
 fn color_and_width(app: &mut PlexiApp, ui: &mut Ui) {
     let highlighter = app.tool == Tool::Highlighter;
     let colors = if highlighter { app.config.highlighter_colors.clone() } else { app.config.pen_colors.clone() };
@@ -366,6 +487,10 @@ pub fn notebook(app: &mut PlexiApp, ui: &mut Ui, rect: Rect) {
                         app.redo();
                     }
                     vsep(ui);
+                    let tip = format!("Snip an area of the screen ({})", app.config.hotkey_snip);
+                    if icon_button(ui, Icon::Snip, false, &tip).clicked() {
+                        app.start_snip(&ctx);
+                    }
                     let tip = format!("Draw on your screen ({})", app.config.hotkey_draw);
                     if accent_button(ui, Icon::Screen, "Draw on screen").on_hover_text(tip).clicked() {
                         app.enter_overlay(&ctx, false);
@@ -374,6 +499,7 @@ pub fn notebook(app: &mut PlexiApp, ui: &mut Ui, rect: Rect) {
             });
         });
 
+    text_bar(app, &ctx, 62.0);
     page_bar(app, &ctx);
 
     egui::Area::new(Id::unique("nb-zoom"))
@@ -552,7 +678,9 @@ fn sheet_settings(app: &mut PlexiApp, ui: &mut Ui) {
     let c = &mut app.config;
     ui.checkbox(&mut c.sheet_guides, "Show sheet outlines")
         .on_hover_text("Outlines appear wherever you draw; PDF export prints one sheet per outline");
-    if c.sheet_guides {
+    ui.checkbox(&mut c.sheet_numbers, "Show sheet numbers")
+        .on_hover_text("The numbers to type in the export dialog's page list");
+    if c.sheet_guides || c.sheet_numbers {
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("sheet-paper")
                 .selected_text(PAPERS[c.sheet_paper.min(PAPERS.len() - 1)].0)
@@ -605,10 +733,18 @@ fn file_menu(app: &mut PlexiApp, ui: &mut Ui) {
         ui.close();
         app.open_export_dialog();
     }
+    if item(ui, "Print…", "Ctrl+P").clicked() {
+        ui.close();
+        app.open_export_dialog();
+    }
     ui.separator();
     if item(ui, "Draw on screen", &app.config.hotkey_draw.clone()).clicked() {
         ui.close();
         app.enter_overlay(&ctx, false);
+    }
+    if item(ui, "Snip an area of the screen", &app.config.hotkey_snip.clone()).clicked() {
+        ui.close();
+        app.start_snip(&ctx);
     }
     if item(ui, "Command palette", "Ctrl+K").clicked() {
         ui.close();
@@ -629,11 +765,74 @@ fn file_menu(app: &mut PlexiApp, ui: &mut Ui) {
     }
 }
 
+/// Picking the area to snip: everything but the area is dimmed.
+fn snip_ui(app: &mut PlexiApp, ui: &mut Ui, rect: Rect) {
+    let ctx = ui.ctx().clone();
+    app.snip_input(&ctx);
+    let snip: Option<Snip> = match &app.mode {
+        Mode::Overlay(o) if o.snapshot.is_none() => o.snip,
+        _ => None,
+    };
+    let Some(snip) = snip else { return };
+    let p = ui.painter();
+    let dim = Color32::from_black_alpha(90);
+    match snip.start.map(|s| Rect::from_two_pos(s, snip.end)) {
+        Some(r) => {
+            for side in [
+                Rect::from_min_max(rect.min, pos2(rect.max.x, r.min.y)),
+                Rect::from_min_max(pos2(rect.min.x, r.max.y), rect.max),
+                Rect::from_min_max(pos2(rect.min.x, r.min.y), pos2(r.min.x, r.max.y)),
+                Rect::from_min_max(pos2(r.max.x, r.min.y), pos2(rect.max.x, r.max.y)),
+            ] {
+                p.rect_filled(side, 0.0, dim);
+            }
+            p.rect_stroke(r, 0.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Outside);
+            p.rect_stroke(r.expand(1.5), 0.0, Stroke::new(1.0, ACCENT), StrokeKind::Outside);
+            let ppp = ctx.pixels_per_point();
+            let label = format!("{} × {}", (r.width() * ppp).round(), (r.height() * ppp).round());
+            let at = if r.bottom() + 24.0 < rect.bottom() {
+                r.left_bottom() + vec2(0.0, 6.0)
+            } else {
+                r.left_top() + vec2(6.0, 6.0)
+            };
+            let font = egui::FontId::proportional(12.0);
+            let g = p.layout_no_wrap(label, font, Color32::WHITE);
+            p.rect_filled(Rect::from_min_size(at, g.size() + vec2(10.0, 4.0)), 4.0, Color32::from_black_alpha(160));
+            p.galley(at + vec2(5.0, 2.0), g, Color32::WHITE);
+        }
+        None => {
+            p.rect_filled(rect, 0.0, dim);
+        }
+    }
+    ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+    if snip.start.is_none() {
+        egui::Area::new(Id::unique("snip-hint"))
+            .anchor(Align2::CENTER_TOP, vec2(0.0, 14.0))
+            .order(Order::Foreground)
+            .interactable(false)
+            .show(&ctx, |ui| {
+                pill(ui).show(ui, |ui| {
+                    ui.label("Drag over the area to snip  ·  Esc or right-click to cancel");
+                });
+            });
+    }
+}
+
 pub fn overlay(app: &mut PlexiApp, ui: &mut Ui, rect: Rect, o: &Overlay) {
     let ctx = ui.ctx().clone();
     if !o.passthrough {
         // An almost invisible wash so clicks on empty screen land on the overlay.
         ui.painter().rect_filled(rect, 0.0, Color32::from_black_alpha(1));
+    }
+    if let Some(snip) = o.snip {
+        // Screen ink shows (and is snipped) only when the snip started on screen.
+        if snip.from != SnipFrom::Notebook {
+            app.canvas(ui, rect, Target::Overlay, Color32::TRANSPARENT);
+        }
+        if o.snapshot.is_none() {
+            snip_ui(app, ui, rect);
+        }
+        return;
     }
     app.canvas(ui, rect, Target::Overlay, Color32::TRANSPARENT);
     let now = ui.input(|i| i.time);
@@ -688,6 +887,11 @@ pub fn overlay(app: &mut PlexiApp, ui: &mut Ui, rect: Rect, o: &Overlay) {
                     let snap = icon_button(ui, Icon::Camera, false, "Snapshot");
                     egui::Popup::menu(&snap).show(|ui| {
                         ui.set_min_width(240.0);
+                        let key = app.config.hotkey_snip.clone();
+                        if ui.add(egui::Button::new("Snip an area…").shortcut_text(key)).clicked() {
+                            ui.close();
+                            app.start_snip(&ctx);
+                        }
                         if ui.add(egui::Button::new("Copy screenshot with ink").shortcut_text("Ctrl+Shift+C")).clicked()
                         {
                             ui.close();
@@ -720,6 +924,7 @@ pub fn overlay(app: &mut PlexiApp, ui: &mut Ui, rect: Rect, o: &Overlay) {
                 });
             });
         });
+    text_bar(app, &ctx, 64.0);
 }
 
 // ----- dialogs ----------------------------------------------------------------------
@@ -747,6 +952,9 @@ enum Cmd {
     Background(Background),
     Size(PageSize),
     SheetGuides,
+    SheetNumbers,
+    Snip,
+    Print,
     Fit,
     SelectAll,
     Delete,
@@ -772,6 +980,8 @@ fn commands(app: &PlexiApp) -> Vec<(Cmd, String, String)> {
         (Cmd::Save, "Save".into(), "Ctrl+S".into()),
         (Cmd::SaveAs, "Save as…".into(), "Ctrl+Shift+S".into()),
         (Cmd::Export, "Export… (PDF, PNG, SVG, Markdown, …)".into(), "Ctrl+E".into()),
+        (Cmd::Print, "Print…".into(), "Ctrl+P".into()),
+        (Cmd::Snip, "Snip an area of the screen".into(), hk.hotkey_snip.clone()),
         (Cmd::AddPage, "Add page".into(), "Ctrl+Enter".into()),
         (Cmd::DeletePage, "Delete page".into(), String::new()),
         (Cmd::NextPage, "Next page".into(), "PgDn".into()),
@@ -818,6 +1028,8 @@ fn commands(app: &PlexiApp) -> Vec<(Cmd, String, String)> {
     }
     let guides = if app.config.sheet_guides { "Hide sheet outlines" } else { "Show sheet outlines" };
     v.push((Cmd::SheetGuides, guides.into(), String::new()));
+    let numbers = if app.config.sheet_numbers { "Hide sheet numbers" } else { "Show sheet numbers" };
+    v.push((Cmd::SheetNumbers, numbers.into(), String::new()));
     v
 }
 
@@ -866,6 +1078,9 @@ fn run_cmd(app: &mut PlexiApp, ctx: &Context, cmd: Cmd) {
             app.fit_pending = true;
         }
         Cmd::SheetGuides => app.config.sheet_guides = !app.config.sheet_guides,
+        Cmd::SheetNumbers => app.config.sheet_numbers = !app.config.sheet_numbers,
+        Cmd::Snip => app.start_snip(ctx),
+        Cmd::Print => app.open_export_dialog(),
         Cmd::Fit => app.fit_pending = true,
         Cmd::SelectAll => app.select_all(),
         Cmd::Delete => app.delete_selection(),
@@ -974,11 +1189,20 @@ pub struct Preview {
     /// Every output page: which page it shows (`None` is the screen ink) and its frame.
     frames: Vec<(Option<usize>, OutFrame)>,
     pub index: usize,
+    /// How many output pages there are before the page list picks some.
+    total: usize,
+    pick_error: Option<String>,
     texture: Option<egui::TextureHandle>,
     /// `key#index` of the rendering in `texture`.
     shown: String,
     pending: Option<(String, Receiver<PreviewResult>)>,
     error: Option<String>,
+}
+
+impl Preview {
+    pub fn total(&self) -> usize {
+        self.total
+    }
 }
 
 #[cfg(test)]
@@ -1008,12 +1232,24 @@ fn refresh_preview(app: &mut PlexiApp, ctx: &Context) {
     }
     let doc = &app.doc;
     let page_of = |i: Option<usize>| i.and_then(|i| doc.pages.get(i)).unwrap_or(&doc.overlay);
-    let key = format!("{:?}|{:?}|{}|{}", opts.layout, pages, app.revision, opts.background);
-    let pv = &mut dlg.preview;
-    if pv.key != key {
-        pv.frames = pages.iter().flat_map(|&i| opts.frames(page_of(i)).into_iter().map(move |f| (i, f))).collect();
+    let key = format!(
+        "{:?}|{:?}|{}|{}|{}|{}",
+        opts.layout, pages, app.revision, opts.background, dlg.pick_pages, dlg.page_list
+    );
+    if dlg.preview.key != key {
+        let all: Vec<_> =
+            pages.iter().flat_map(|&i| opts.frames(page_of(i)).into_iter().map(move |f| (i, f))).collect();
+        let picked = dlg.pick(all.len());
+        let pv = &mut dlg.preview;
+        pv.total = all.len();
+        pv.pick_error = picked.as_ref().err().cloned();
+        pv.frames = match picked {
+            Ok(Some(k)) => all.into_iter().enumerate().filter(|(i, _)| k.contains(i)).map(|(_, f)| f).collect(),
+            _ => all,
+        };
         pv.key = key;
     }
+    let pv = &mut dlg.preview;
     pv.index = pv.index.min(pv.frames.len().saturating_sub(1));
     let Some(&(page_idx, frame)) = pv.frames.get(pv.index) else { return };
     let want = format!("{}#{}", pv.key, pv.index);
@@ -1087,6 +1323,7 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
     let Some(dlg) = &mut app.export else { return };
     let mut open = true;
     let mut go = false;
+    let mut print = false;
     egui::Window::new("Export")
         .open(&mut open)
         .collapsible(false)
@@ -1171,6 +1408,29 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                             ui.radio_value(&mut dlg.scope, ExportScope::ScreenInk, "Screen ink (overlay)");
                         });
                         ui.end_row();
+
+                        let total = dlg.preview.total();
+                        if total > 1 || dlg.pick_pages {
+                            ui.label("Pages");
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.radio_value(&mut dlg.pick_pages, false, format!("All {total}"));
+                                    ui.radio_value(&mut dlg.pick_pages, true, "Only");
+                                    let list = egui::TextEdit::singleline(&mut dlg.page_list)
+                                        .hint_text("1, 3, 5-7")
+                                        .desired_width(96.0);
+                                    if ui.add(list).changed() {
+                                        dlg.pick_pages = true;
+                                    }
+                                });
+                                if dlg.pick_pages
+                                    && let Some(e) = &dlg.preview.pick_error
+                                {
+                                    ui.colored_label(Color32::from_rgb(0xd6, 0x3a, 0x3a), e);
+                                }
+                            });
+                            ui.end_row();
+                        }
 
                         if is_visual(dlg.format) {
                             ui.label("Area");
@@ -1272,10 +1532,20 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                         ui.weak("One file per image: name-1, name-2, …");
                     }
                     ui.add_space(6.0);
-                    let label = egui::RichText::new("Export…").color(Color32::WHITE);
-                    if ui.add(egui::Button::new(label).fill(ACCENT).min_size(vec2(96.0, 30.0))).clicked() {
-                        go = true;
-                    }
+                    ui.horizontal(|ui| {
+                        let label = egui::RichText::new("Export…").color(Color32::WHITE);
+                        if ui.add(egui::Button::new(label).fill(ACCENT).min_size(vec2(96.0, 30.0))).clicked() {
+                            go = true;
+                        }
+                        if dlg.format == ExportFormat::Pdf
+                            && ui
+                                .add(egui::Button::new("Print…").min_size(vec2(80.0, 30.0)))
+                                .on_hover_text("Opens the PDF in your PDF viewer to print")
+                                .clicked()
+                        {
+                            print = true;
+                        }
+                    });
                 });
             });
         });
@@ -1283,6 +1553,8 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
         app.export = None;
     } else if go {
         app.run_export();
+    } else if print {
+        app.run_print();
     }
 }
 
@@ -1322,6 +1594,14 @@ fn context_menu(app: &mut PlexiApp, ctx: &Context) {
                     } else {
                         if item(ui, "Lock image") {
                             app.set_locked(t, &ids, true);
+                            close = true;
+                        }
+                        if item(ui, "Crop image") {
+                            app.start_crop(t, img.id);
+                            close = true;
+                        }
+                        if img.crop.is_some() && item(ui, "Remove crop") {
+                            app.remove_crop(t, img.id);
                             close = true;
                         }
                         if item(ui, "Reset to original size") {
@@ -1372,6 +1652,12 @@ fn context_menu(app: &mut PlexiApp, ctx: &Context) {
                                 }
                             }
                         });
+                        if app.doc.pages[i].size.dims().is_none() {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut app.config.sheet_guides, "Sheet outlines");
+                                ui.checkbox(&mut app.config.sheet_numbers, "Sheet numbers");
+                            });
+                        }
                         ui.separator();
                         let label = if app.doc.pages.len() > 1 { "Delete this page" } else { "Clear this page" };
                         if item(ui, label) {
@@ -1423,6 +1709,9 @@ fn settings_window(app: &mut PlexiApp, ctx: &Context) {
             ui.label("Back to notebook");
             ui.text_edit_singleline(&mut c.hotkey_notebook);
             ui.end_row();
+            ui.label("Snip an area");
+            ui.text_edit_singleline(&mut c.hotkey_snip);
+            ui.end_row();
         });
         ui.weak("Hotkey changes apply the next time Plexi starts.");
         ui.separator();
@@ -1464,6 +1753,7 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
             ("Draw on screen / click-through", app.config.hotkey_draw.clone()),
             ("Clear screen ink", app.config.hotkey_clear.clone()),
             ("Back to notebook", app.config.hotkey_notebook.clone()),
+            ("Snip an area of the screen", app.config.hotkey_snip.clone()),
             ("Command palette", "Ctrl+K".into()),
             ("Pen · Highlighter · Eraser", "P · H · E".into()),
             ("Select · Text", "S · T".into()),
@@ -1473,6 +1763,8 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
             ("Erase with any tool", "Middle-drag (or pen barrel button)".into()),
             ("Menu: lock image, arrange, paper, delete page", "Right-click (no drag)".into()),
             ("Resize an image", "Select it, drag a corner (Shift: free)".into()),
+            ("Crop an image", "Right-click it → Crop image".into()),
+            ("Edit a text box", "Double-click it (Select tool)".into()),
             ("Pan", "Right-drag · Space+drag · Shift+scroll · two fingers".into()),
             ("Zoom", "Scroll wheel · pinch · Ctrl+= / Ctrl+-".into()),
             ("Fit page", "Ctrl+0".into()),
@@ -1481,7 +1773,7 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
             ("Select all · Duplicate · Delete", "Ctrl+A · Ctrl+D · Del".into()),
             ("Straight lines, squares", "hold Shift".into()),
             ("Paste image or text", "Ctrl+V".into()),
-            ("Save · Open · Export", "Ctrl+S · Ctrl+O · Ctrl+E".into()),
+            ("Save · Open · Export · Print", "Ctrl+S · Ctrl+O · Ctrl+E · Ctrl+P".into()),
             ("On screen: click-through · clear · snapshot", "Esc · C · Ctrl+Shift+C".into()),
         ];
         egui::Grid::new("keys").num_columns(2).spacing(vec2(24.0, 6.0)).striped(true).show(ui, |ui| {

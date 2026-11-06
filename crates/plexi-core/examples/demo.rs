@@ -36,13 +36,7 @@ fn main() {
     let page = &mut doc.pages[0];
     page.name = "Lecture notes".into();
     page.background = Background::Lined;
-    page.elements.push(Element::Text(TextBox {
-        id: new_id(),
-        pos: [72.0, 56.0],
-        text: "Week 3 — Revenue recognition".into(),
-        size: 30.0,
-        color: ink,
-    }));
+    page.elements.push(Element::Text(TextBox::new([72.0, 56.0], "Week 3 — Revenue recognition", 30.0, ink)));
     page.elements.push(Element::Stroke(Stroke {
         id: new_id(),
         kind: InkKind::Highlighter,
@@ -53,14 +47,12 @@ fn main() {
     for (i, y) in [160.0, 224.0, 288.0, 352.0].into_iter().enumerate() {
         page.elements.push(loops(84.0, y, 10 + i * 3, if i == 1 { blue } else { ink }));
     }
-    page.elements.push(Element::Text(TextBox {
-        id: new_id(),
-        pos: [480.0, 140.0],
-        text: "1. Identify the contract\n2. Performance obligations\n3. Transaction price\n4. Allocate\n5. Recognize"
-            .into(),
-        size: 18.0,
-        color: blue,
-    }));
+    page.elements.push(Element::Text(TextBox::new(
+        [480.0, 140.0],
+        "1. Identify the contract\n2. Performance obligations\n3. Transaction price\n4. Allocate\n5. Recognize",
+        18.0,
+        blue,
+    )));
     page.elements.push(Element::Shape(Shape {
         id: new_id(),
         kind: ShapeKind::Ellipse,
@@ -86,22 +78,15 @@ fn main() {
         color: blue,
         width: 2.0,
     }));
-    page.elements.push(Element::Text(TextBox {
-        id: new_id(),
-        pos: [92.0, 560.0],
-        text: "Exam tip: step 5 happens when control transfers,\nnot when cash is received.".into(),
-        size: 20.0,
-        color: ink,
-    }));
+    page.elements.push(Element::Text(TextBox::new(
+        [92.0, 560.0],
+        "Exam tip: step 5 happens when control transfers,\nnot when cash is received.",
+        20.0,
+        ink,
+    )));
 
     // The page is an infinite canvas: this spills onto the sheet to the right.
-    page.elements.push(Element::Text(TextBox {
-        id: new_id(),
-        pos: [880.0, 140.0],
-        text: "Side note, one sheet over".into(),
-        size: 22.0,
-        color: blue,
-    }));
+    page.elements.push(Element::Text(TextBox::new([880.0, 140.0], "Side note, one sheet over", 22.0, blue)));
     page.elements.push(wave(880.0, 220.0, 520.0, 18.0, 3.0, blue, 3.0));
 
     let mut grid = Page::new("Sketches", PageSize::Letter);

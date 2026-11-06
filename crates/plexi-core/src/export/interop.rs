@@ -26,6 +26,21 @@ fn stacked(pages: &[&Page]) -> Vec<(Rect, [f32; 2])> {
         .collect()
 }
 
+/// Excalidraw's image crop, in the picture's own pixels.
+fn excalidraw_crop(img: &ImageEl, bytes: &[u8]) -> Value {
+    let Some([l, t, r, b]) = img.crop else { return Value::Null };
+    let dims = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok());
+    let Some((w, h)) = dims else { return Value::Null };
+    let (w, h) = (w as f32, h as f32);
+    json!({
+        "x": l * w, "y": t * h, "width": (r - l) * w, "height": (b - t) * h,
+        "naturalWidth": w, "naturalHeight": h,
+    })
+}
+
 pub fn excalidraw(pages: &[&Page], assets: &Assets) -> Result<String, ExportError> {
     let mut elements = Vec::new();
     let mut files = serde_json::Map::new();
@@ -122,7 +137,10 @@ pub fn excalidraw(pages: &[&Page], assets: &Assets) -> Result<String, ExportErro
                             1.0,
                             n,
                         ),
-                        json!({ "fileId": file_id, "status": "saved", "scale": [1, 1], "locked": img.locked }),
+                        json!({
+                            "fileId": file_id, "status": "saved", "scale": [1, 1], "locked": img.locked,
+                            "crop": excalidraw_crop(img, bytes),
+                        }),
                     ));
                 }
                 Element::Shape(s) => {
@@ -207,10 +225,12 @@ pub fn drawio(pages: &[&Page], assets: &Assets) -> String {
             let r = t.approx_bounds();
             let _ = writeln!(
                 out,
-                "<mxCell id=\"text-{k}\" value=\"{}\" style=\"text;html=0;whiteSpace=wrap;align=left;verticalAlign=top;fontSize={};fontColor={};spacing=0;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" as=\"geometry\"/></mxCell>",
+                "<mxCell id=\"text-{k}\" value=\"{}\" style=\"text;html=0;whiteSpace=wrap;align=left;verticalAlign=top;fontSize={};fontColor={};fontFamily={};fontStyle={};spacing=0;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" as=\"geometry\"/></mxCell>",
                 svg::esc(&t.text).replace('\n', "&#10;"),
                 svg::n(t.size),
                 t.color.hex_rgb(),
+                svg::esc(t.family()).replace(';', ""),
+                t.bold as u8 | (t.italic as u8) << 1 | (t.underline as u8) << 2,
                 svg::n(t.pos[0] - b.min[0]),
                 svg::n(t.pos[1] - b.min[1]),
                 svg::n(r.width() * 1.2),

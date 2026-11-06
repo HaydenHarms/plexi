@@ -400,14 +400,14 @@ fn picture() -> Vec<u8> {
 }
 
 // Toolbar positions (points) in a 960-wide window.
-const PEN: (f32, f32) = (160.0, 34.0);
-const HIGHLIGHTER: (f32, f32) = (196.0, 34.0);
-const SELECT: (f32, f32) = (268.0, 34.0);
-const TEXT: (f32, f32) = (304.0, 34.0);
-const SHAPE: (f32, f32) = (340.0, 34.0);
-const BLACK: (f32, f32) = (380.0, 34.0);
-const BLUE: (f32, f32) = (406.0, 34.0);
-const RED: (f32, f32) = (432.0, 34.0);
+const PEN: (f32, f32) = (142.0, 34.0);
+const HIGHLIGHTER: (f32, f32) = (178.0, 34.0);
+const SELECT: (f32, f32) = (250.0, 34.0);
+const TEXT: (f32, f32) = (286.0, 34.0);
+const SHAPE: (f32, f32) = (322.0, 34.0);
+const BLACK: (f32, f32) = (362.0, 34.0);
+const BLUE: (f32, f32) = (388.0, 34.0);
+const RED: (f32, f32) = (414.0, 34.0);
 
 #[test]
 #[ignore = "records docs/tour.gif; needs ffmpeg"]
@@ -500,8 +500,8 @@ fn record_tour() {
     // 5. Export with a preview of each sheet.
     r.say("Export to PDF, PNG, SVG and more, with a live preview");
     r.caption.as_mut().unwrap().1 = SIZE[1] - 30.0;
-    r.click((115.0, 34.0));
-    r.click((133.0, 172.0));
+    r.click((97.0, 34.0));
+    r.click((115.0, 172.0));
     std::thread::sleep(std::time::Duration::from_secs(2));
     r.wait(1.0);
     r.snapshot("export");
@@ -521,4 +521,79 @@ fn record_tour() {
         .status()
         .expect("ffmpeg on PATH");
     assert!(status.success());
+}
+
+#[test]
+#[ignore = "renders stills of the newer tools to the temp folder, for a look"]
+fn preview_tools() {
+    let out = std::env::temp_dir().join("plexi-preview");
+    let mut r = Recorder::new(&out);
+    r.wait(0.2);
+    r.click(TEXT);
+    r.click((300.0, 220.0));
+    r.type_text("Fonts now");
+    r.app.apply_text_style(|t| {
+        t.font = Some("Georgia".into());
+        t.size = 40.0;
+        t.bold = true;
+    });
+    r.wait(0.3);
+    r.snapshot("text");
+    r.click((120.0, 300.0));
+    r.click(SELECT);
+    r.click((640.0, 400.0));
+    let ctx = r.ctx.clone();
+    r.app.insert_image(picture(), Some([480.0, 420.0]), &ctx);
+    r.wait(0.2);
+    let id = r.app.selection.iter().next().copied().unwrap();
+    r.app.start_crop(crate::history::Target::Page(0), id);
+    r.wait(0.2);
+    let c = r.app.crop.clone().unwrap();
+    let left = r.app.view.to_screen(r.app.canvas_origin, [c.shown.min[0], c.shown.center()[1]]);
+    r.drag(PointerButton::Primary, &[(left.x, left.y), (left.x + 40.0, left.y), (left.x + 80.0, left.y)], 1);
+    r.snapshot("crop");
+    r.run(
+        vec![Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        }],
+        true,
+    );
+    r.wait(0.2);
+    r.snapshot("cropped");
+    let far = plexi_core::Shape {
+        id: plexi_core::new_id(),
+        kind: plexi_core::ShapeKind::Rect,
+        a: [1000.0, 100.0],
+        b: [1100.0, 200.0],
+        color: plexi_core::Color::BLACK,
+        width: 3.0,
+    };
+    r.app.doc.pages[0].elements.push(plexi_core::Element::Shape(far));
+    r.app.touch();
+    r.app.open_export_dialog();
+    if let Some(d) = &mut r.app.export {
+        d.pick_pages = true;
+        d.page_list = "2".into();
+    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    r.wait(0.5);
+    r.snapshot("export");
+    r.app.export = None;
+    r.app.start_snip(&ctx);
+    r.wait(0.1);
+    r.snapshot("snip-start");
+    r.move_to((200.0, 150.0), 0.2);
+    r.button(PointerButton::Primary, true);
+    for (x, y) in [(300.0, 200.0), (420.0, 280.0), (520.0, 330.0)] {
+        r.pointer = pos2(x, y);
+        r.run(vec![Event::PointerMoved(r.pointer)], true);
+    }
+    r.snapshot("snip");
+    // Cancel rather than let the snip capture the real screen.
+    r.button(PointerButton::Secondary, true);
+    r.finish();
 }

@@ -4,6 +4,7 @@
 //! command-line exporter.
 
 pub mod export;
+pub mod fonts;
 pub mod format;
 pub mod geom;
 pub mod ink;

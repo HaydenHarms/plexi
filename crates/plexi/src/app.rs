@@ -13,8 +13,9 @@ use plexi_core::export::layout::{self, Area, Layout};
 use plexi_core::export::{ExportFormat, RenderOptions};
 use plexi_core::{Color, Document, Element, ImageEl, InkKind, Page, ShapeKind, TextBox, format, new_id};
 
-use crate::canvas::{Interaction, MeshCache, View};
+use crate::canvas::{CropState, Interaction, MeshCache, View};
 use crate::config::{self, Config};
+use crate::fonts::FontBook;
 use crate::history::{History, Snapshot, Target};
 use crate::platform::{self, PxRect};
 use crate::shell::{Shell, ShellEvent};
@@ -54,6 +55,28 @@ pub enum SnapshotAction {
     ToPage,
     /// Desktop plus ink to an image file.
     SaveImage,
+    /// The area picked with [`Snip`]: onto the clipboard, and into the notebook when the
+    /// snip started there.
+    Snip,
+}
+
+/// Where to go once a snip is done (or cancelled).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnipFrom {
+    Notebook,
+    ClickThrough,
+    Drawing,
+}
+
+/// Picking an area of the screen to snip.
+#[derive(Clone, Copy, Debug)]
+pub struct Snip {
+    pub from: SnipFrom,
+    /// Where the drag started, once it has.
+    pub start: Option<egui::Pos2>,
+    pub end: egui::Pos2,
+    /// The finished area, waiting for the screenshot.
+    pub rect: Option<egui::Rect>,
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +89,7 @@ pub struct Overlay {
     /// Show the "click-through" hint until this time.
     pub hint_until: f64,
     pub snapshot: Option<(SnapshotAction, u8)>,
+    pub snip: Option<Snip>,
 }
 
 #[derive(Clone, Debug)]
@@ -114,6 +138,9 @@ pub struct ExportDialog {
     pub tile: bool,
     /// Margin in inches.
     pub margin_in: f32,
+    /// Export only the output pages listed in `page_list` (e.g. "1, 3, 5-7").
+    pub pick_pages: bool,
+    pub page_list: String,
     pub preview: crate::ui::Preview,
 }
 
@@ -133,7 +160,15 @@ impl ExportDialog {
     }
 
     pub fn render_options(&self) -> RenderOptions {
-        RenderOptions { scale: self.scale, background: self.background, text: true, layout: self.layout() }
+        RenderOptions { scale: self.scale, background: self.background, text: true, layout: self.layout(), pick: None }
+    }
+
+    /// The output pages picked, out of `total` (`None` for all of them).
+    pub fn pick(&self, total: usize) -> Result<Option<Vec<usize>>, String> {
+        if !self.pick_pages {
+            return Ok(None);
+        }
+        layout::parse_page_list(&self.page_list, total).map(Some)
     }
 }
 
@@ -172,6 +207,7 @@ pub struct StartOptions {
 enum Job {
     Saved(PathBuf, Result<(), String>),
     Exported(Result<Vec<PathBuf>, String>),
+    Printed(Result<PathBuf, String>),
     UpdateChecked { manual: bool, result: Result<Option<Release>, String> },
     UpdateProgress(f32),
     UpdateDownloaded(Result<PathBuf, String>),
@@ -216,6 +252,14 @@ pub struct PlexiApp {
     pub last_sample_time: f64,
     pub cache: MeshCache,
     pub textures: HashMap<String, egui::TextureHandle>,
+    pub fonts: FontBook,
+    /// The text box being edited got a new font or style (a change even if the words
+    /// stay the same).
+    pub edit_style_changed: bool,
+    pub crop: Option<CropState>,
+    /// A snip waiting to go onto the page once the notebook window is back, with the
+    /// frames left to wait.
+    pending_image: Option<(Vec<u8>, u8)>,
     pub config: Config,
     pub palette: PaletteState,
     pub export: Option<ExportDialog>,
@@ -250,6 +294,7 @@ impl PlexiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, start: StartOptions) -> Self {
         crate::ui::install_style(&cc.egui_ctx);
         let config = Config::load();
+        FontBook::warm_up();
         let (jobs_tx, jobs_rx) = channel();
         let mut app = Self {
             doc: Document::new("Untitled"),
@@ -275,6 +320,10 @@ impl PlexiApp {
             last_sample_time: 0.0,
             cache: MeshCache::default(),
             textures: HashMap::new(),
+            fonts: FontBook::default(),
+            edit_style_changed: false,
+            crop: None,
+            pending_image: None,
             config,
             palette: PaletteState::default(),
             export: None,
@@ -393,6 +442,7 @@ impl PlexiApp {
 
     pub fn undo(&mut self) {
         self.finish_text_edit();
+        self.crop = None;
         if let Some(s) = self.history.pop_undo() {
             let back = self.restore(s);
             self.history.push_redo(back);
@@ -403,6 +453,7 @@ impl PlexiApp {
 
     pub fn redo(&mut self) {
         self.finish_text_edit();
+        self.crop = None;
         if let Some(s) = self.history.pop_redo() {
             let back = self.restore(s);
             self.history.push_keep_redo(back);
@@ -425,6 +476,7 @@ impl PlexiApp {
         self.history.clear();
         self.selection.clear();
         self.editing_text = None;
+        self.crop = None;
         self.interaction = Interaction::Idle;
         self.page = 0;
         self.fit_pending = true;
@@ -595,6 +647,11 @@ impl PlexiApp {
                     self.toast(format!("Exported {first}{more}"));
                 }
                 Job::Exported(Err(e)) => self.toast_error(format!("Export failed: {e}")),
+                Job::Printed(Ok(path)) => {
+                    open_url(&path.to_string_lossy());
+                    self.toast("Opened in your PDF viewer — print from there (Ctrl+P)");
+                }
+                Job::Printed(Err(e)) => self.toast_error(format!("Couldn't make the PDF to print: {e}")),
                 Job::UpdateChecked { manual, result } => {
                     self.update = UpdateState::Idle;
                     match result {
@@ -705,10 +762,58 @@ impl PlexiApp {
         }
     }
 
+    /// The export dialog's options, with the picked pages; `None` (after saying why) if
+    /// the page list doesn't parse.
+    fn export_options(&mut self) -> Option<RenderOptions> {
+        let dlg = self.export.as_ref()?;
+        let mut opts = dlg.render_options();
+        match dlg.pick(dlg.preview.total()) {
+            Ok(pick) => opts.pick = pick,
+            Err(e) => {
+                self.toast_error(format!("Pages: {e}"));
+                return None;
+            }
+        }
+        Some(opts)
+    }
+
+    /// The pages an export covers, for the worker thread.
+    fn export_page_list(doc: &Document, scope: ExportScope, page: usize) -> Vec<&Page> {
+        match scope {
+            ExportScope::CurrentPage => vec![&doc.pages[page]],
+            ExportScope::AllPages => doc.pages.iter().collect(),
+            ExportScope::ScreenInk => vec![&doc.overlay],
+        }
+    }
+
+    /// Write the export dialog's pages to a PDF in the temp folder and open it, to print
+    /// from the system's PDF viewer.
+    pub fn run_print(&mut self) {
+        let Some(scope) = self.export.as_ref().map(|d| d.scope) else { return };
+        let Some(mut opts) = self.export_options() else { return };
+        opts.scale = 1.0;
+        self.export = None;
+        self.finish_text_edit_keep();
+        let stem: String =
+            self.display_name().chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-').collect();
+        let path = std::env::temp_dir().join(format!("Plexi print - {}.pdf", stem.trim()));
+        let doc = self.doc.clone();
+        let page = self.page;
+        let tx = self.jobs_tx.clone();
+        self.toast("Preparing to print…");
+        std::thread::spawn(move || {
+            let pages = Self::export_page_list(&doc, scope, page);
+            let r = plexi_core::export::export(&doc, &pages, ExportFormat::Pdf, &opts, &path)
+                .map(|_| path)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Job::Printed(r));
+        });
+    }
+
     pub fn run_export(&mut self) {
         let Some(dlg) = &self.export else { return };
         let (format, scope) = (dlg.format, dlg.scope);
-        let opts = dlg.render_options();
+        let Some(opts) = self.export_options() else { return };
         let stem = match scope {
             ExportScope::CurrentPage if self.doc.pages.len() > 1 => {
                 format!("{} - {}", self.display_name(), self.doc.pages[self.page].name)
@@ -733,11 +838,7 @@ impl PlexiApp {
         let tx = self.jobs_tx.clone();
         self.toast("Exporting…");
         std::thread::spawn(move || {
-            let pages: Vec<&Page> = match scope {
-                ExportScope::CurrentPage => vec![&doc.pages[page]],
-                ExportScope::AllPages => doc.pages.iter().collect(),
-                ExportScope::ScreenInk => vec![&doc.overlay],
-            };
+            let pages = Self::export_page_list(&doc, scope, page);
             let r = plexi_core::export::export(&doc, &pages, format, &opts, &path).map_err(|e| e.to_string());
             let _ = tx.send(Job::Exported(r));
         });
@@ -765,6 +866,7 @@ impl PlexiApp {
             return;
         }
         self.finish_text_edit();
+        self.crop = None;
         self.checkpoint_pages();
         let name = self.doc.pages[i].name.clone();
         if self.doc.pages.len() == 1 {
@@ -784,6 +886,7 @@ impl PlexiApp {
 
     pub fn go_to_page(&mut self, i: usize) {
         self.finish_text_edit();
+        self.finish_crop(true);
         let i = i.min(self.doc.pages.len() - 1);
         if i != self.page {
             self.page = i;
@@ -830,8 +933,9 @@ impl PlexiApp {
         let t = self.target();
         self.checkpoint(t);
         let asset = self.doc.add_asset(stored);
-        let id = new_id();
-        self.page_mut(t).elements.push(Element::Image(ImageEl { id, asset, pos, size, locked: false }));
+        let img = ImageEl::new(asset, pos, size);
+        let id = img.id;
+        self.page_mut(t).elements.push(Element::Image(img));
         self.selection = [id].into();
         self.tool = Tool::Lasso;
     }
@@ -840,9 +944,74 @@ impl PlexiApp {
         let c = self.view_center(ctx);
         let t = self.target();
         self.checkpoint(t);
-        let size = 20.0;
-        let color = self.pen_color_for_text();
-        self.page_mut(t).elements.push(Element::Text(TextBox { id: new_id(), pos: c, text, size, color }));
+        let mut tb = self.text_template(c);
+        tb.text = text;
+        self.page_mut(t).elements.push(Element::Text(tb));
+    }
+
+    /// An empty text box at `pos` in the style new text gets.
+    pub fn text_template(&self, pos: [f32; 2]) -> TextBox {
+        let c = &self.config;
+        let mut tb = TextBox::new(pos, "", c.text_size, self.pen_color_for_text());
+        tb.font = c.text_font.clone();
+        (tb.bold, tb.italic, tb.underline) = (c.text_bold, c.text_italic, c.text_underline);
+        tb
+    }
+
+    /// The text the style controls show and change: the box being edited, else the
+    /// selected text boxes, else the style for new ones.
+    pub fn text_style(&self) -> TextBox {
+        let editing = self.editing_text.and_then(|(t, id)| self.page_ref(t).elements.iter().find(|e| e.id() == id));
+        let selected = self
+            .page_ref(self.target())
+            .elements
+            .iter()
+            .find(|e| self.selection.contains(&e.id()) && matches!(e, Element::Text(_)));
+        match editing.or(selected) {
+            Some(Element::Text(tb)) => tb.clone(),
+            _ => self.text_template([0.0, 0.0]),
+        }
+    }
+
+    /// Whether any text box is selected.
+    pub fn text_selected(&self) -> bool {
+        self.page_ref(self.target())
+            .elements
+            .iter()
+            .any(|e| self.selection.contains(&e.id()) && matches!(e, Element::Text(_)))
+    }
+
+    /// Change the font or style of the text being edited or selected, and of new text.
+    pub fn apply_text_style(&mut self, f: impl Fn(&mut TextBox)) {
+        let mut style = self.text_template([0.0, 0.0]);
+        f(&mut style);
+        let c = &mut self.config;
+        c.text_font = style.font.clone();
+        (c.text_size, c.text_bold, c.text_italic, c.text_underline) =
+            (style.size, style.bold, style.italic, style.underline);
+        if let Some((t, id)) = self.editing_text {
+            if let Some(Element::Text(tb)) = self.page_mut(t).elements.iter_mut().find(|e| e.id() == id) {
+                f(tb);
+                self.edit_style_changed = true;
+            }
+            return;
+        }
+        if self.text_selected() {
+            let t = self.target();
+            self.checkpoint(t);
+            let sel = std::mem::take(&mut self.selection);
+            let mut new_sel = HashSet::new();
+            for e in &mut self.page_mut(t).elements {
+                if sel.contains(&e.id()) {
+                    if let Element::Text(tb) = e {
+                        f(tb);
+                        e.renew_id();
+                    }
+                    new_sel.insert(e.id());
+                }
+            }
+            self.selection = new_sel;
+        }
     }
 
     pub fn pen_color_for_text(&self) -> Color {
@@ -984,7 +1153,8 @@ impl PlexiApp {
             && let Element::Image(img) = &mut page.elements[i]
         {
             let c = [img.pos[0] + img.size[0] / 2.0, img.pos[1] + img.size[1] / 2.0];
-            img.size = [w as f32 / ppp, h as f32 / ppp];
+            let [l, top, r, b] = img.crop_or_full();
+            img.size = [w as f32 / ppp * (r - l), h as f32 / ppp * (b - top)];
             img.pos = [c[0] - img.size[0] / 2.0, c[1] - img.size[1] / 2.0];
             page.elements[i].renew_id();
             let new = page.elements[i].id();
@@ -1040,6 +1210,7 @@ impl PlexiApp {
         self.finish_text_edit();
         let Some(Element::Text(tb)) = self.page_ref(t).elements.iter().find(|e| e.id() == id) else { return };
         self.text_buf = tb.text.clone();
+        self.edit_style_changed = false;
         self.pending_snapshot = Some(self.snapshot_of(t));
         self.editing_text = Some((t, id));
         self.text_focus_pending = true;
@@ -1049,8 +1220,8 @@ impl PlexiApp {
     pub fn finish_text_edit(&mut self) {
         let Some((t, id)) = self.editing_text.take() else { return };
         let text = std::mem::take(&mut self.text_buf);
+        let mut changed = std::mem::take(&mut self.edit_style_changed);
         let page = self.page_mut(t);
-        let mut changed = false;
         if let Some(i) = page.find(id)
             && let Element::Text(tb) = &mut page.elements[i]
         {
@@ -1090,6 +1261,7 @@ impl PlexiApp {
 
     pub fn enter_overlay(&mut self, ctx: &Context, passthrough: bool) {
         self.finish_text_edit();
+        self.finish_crop(true);
         self.selection.clear();
         self.interaction = Interaction::Idle;
         if let Mode::Overlay(o) = &mut self.mode {
@@ -1118,6 +1290,7 @@ impl PlexiApp {
             place_in: 2,
             hint_until: 0.0,
             snapshot: None,
+            snip: None,
         });
         self.set_passthrough(ctx, passthrough);
     }
@@ -1149,6 +1322,7 @@ impl PlexiApp {
             return;
         }
         self.interaction = Interaction::Idle;
+        self.crop = None;
         self.mode = Mode::Notebook;
         if !self.config.keep_overlay_ink && !self.doc.overlay.elements.is_empty() {
             self.checkpoint(Target::Overlay);
@@ -1181,6 +1355,87 @@ impl PlexiApp {
             self.checkpoint(Target::Overlay);
             self.doc.overlay.elements.clear();
             self.selection.clear();
+        }
+    }
+
+    /// Pick an area of the screen to snip: copied to the clipboard, and put on the page
+    /// when this starts from the notebook.
+    pub fn start_snip(&mut self, ctx: &Context) {
+        let from = match &self.mode {
+            Mode::Notebook => SnipFrom::Notebook,
+            Mode::Overlay(o) if o.passthrough => SnipFrom::ClickThrough,
+            Mode::Overlay(_) => SnipFrom::Drawing,
+        };
+        match from {
+            SnipFrom::Notebook => self.enter_overlay(ctx, false),
+            SnipFrom::ClickThrough => self.set_passthrough(ctx, false),
+            SnipFrom::Drawing => {}
+        }
+        self.interaction = Interaction::Idle;
+        self.selection.clear();
+        if let Mode::Overlay(o) = &mut self.mode {
+            o.hint_until = 0.0;
+            o.snip = Some(Snip { from, start: None, end: egui::Pos2::ZERO, rect: None });
+        }
+    }
+
+    /// Go back to wherever the snip started from.
+    fn leave_snip(&mut self, ctx: &Context, from: SnipFrom) {
+        match from {
+            SnipFrom::Notebook => self.exit_overlay(ctx),
+            SnipFrom::ClickThrough => self.set_passthrough(ctx, true),
+            SnipFrom::Drawing => {}
+        }
+    }
+
+    pub fn cancel_snip(&mut self, ctx: &Context) {
+        let Mode::Overlay(o) = &mut self.mode else { return };
+        let Some(snip) = o.snip.take() else { return };
+        o.snapshot = None;
+        if let Some(h) = self.hwnd {
+            platform::exclude_from_capture(h, false);
+        }
+        self.leave_snip(ctx, snip.from);
+    }
+
+    /// Pointer input while picking the snip area.
+    pub fn snip_input(&mut self, ctx: &Context) {
+        let events = ctx.input(|i| i.events.clone());
+        let mut cancel = false;
+        let mut done = false;
+        if let Mode::Overlay(o) = &mut self.mode
+            && let Some(snip) = &mut o.snip
+            && snip.rect.is_none()
+        {
+            for ev in events {
+                match ev {
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. } => {
+                        snip.start = Some(pos);
+                        snip.end = pos;
+                    }
+                    egui::Event::PointerButton { button: egui::PointerButton::Secondary, pressed: true, .. } => {
+                        cancel = true;
+                    }
+                    egui::Event::PointerMoved(pos) if snip.start.is_some() => snip.end = pos,
+                    egui::Event::PointerButton {
+                        pos, button: egui::PointerButton::Primary, pressed: false, ..
+                    } => {
+                        if let Some(start) = snip.start.take() {
+                            let r = egui::Rect::from_two_pos(start, pos);
+                            if r.width() >= 4.0 && r.height() >= 4.0 {
+                                snip.rect = Some(r);
+                                done = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if cancel {
+            self.cancel_snip(ctx);
+        } else if done {
+            self.request_snapshot(SnapshotAction::Snip);
         }
     }
 
@@ -1274,6 +1529,10 @@ impl PlexiApp {
 
     fn finish_snapshot(&mut self, ctx: &Context, action: SnapshotAction, shot: image::RgbaImage) {
         let ppp = ctx.pixels_per_point();
+        let snip = match &mut self.mode {
+            Mode::Overlay(o) => o.snip.take(),
+            Mode::Notebook => None,
+        };
         let (w, h) = (shot.width() as f32 / ppp, shot.height() as f32 / ppp);
         let mut png = std::io::Cursor::new(Vec::new());
         if shot.write_to(&mut png, image::ImageFormat::Png).is_err() {
@@ -1287,9 +1546,43 @@ impl PlexiApp {
             pos: [0.0, 0.0],
             size: [w, h],
             locked: true,
+            crop: None,
         }));
-        page.elements.extend(self.doc.overlay.elements.iter().cloned());
+        if snip.is_none_or(|s| s.from != SnipFrom::Notebook) {
+            page.elements.extend(self.doc.overlay.elements.iter().cloned());
+        }
         match action {
+            SnapshotAction::Snip => {
+                let Some(snip) = snip else { return };
+                let area = snip.rect.unwrap_or(egui::Rect::NOTHING).translate(-ctx.content_rect().min.to_vec2());
+                let area = plexi_core::Rect::from_min_size([area.min.x, area.min.y], [area.width(), area.height()]);
+                let opts = RenderOptions { scale: ppp, background: false, ..Default::default() };
+                let img = plexi_core::export::raster::area_rgba(&page, &self.doc.assets, &opts, area);
+                self.doc.prune_assets();
+                let img = match img {
+                    Ok(i) => i,
+                    Err(e) => {
+                        self.toast_error(format!("Snip failed: {e}"));
+                        self.leave_snip(ctx, snip.from);
+                        return;
+                    }
+                };
+                let ci = egui::ColorImage::from_rgba_unmultiplied(
+                    [img.width() as usize, img.height() as usize],
+                    img.as_raw(),
+                );
+                ctx.copy_image(ci);
+                self.leave_snip(ctx, snip.from);
+                if snip.from == SnipFrom::Notebook {
+                    let mut png = std::io::Cursor::new(Vec::new());
+                    if img.write_to(&mut png, image::ImageFormat::Png).is_ok() {
+                        self.pending_image = Some((png.into_inner(), 3));
+                    }
+                    self.toast("Snip added to the page and copied to the clipboard");
+                } else {
+                    self.toast("Snip copied to the clipboard");
+                }
+            }
             SnapshotAction::ToPage => {
                 self.checkpoint_pages();
                 self.doc.pages.push(page);
@@ -1344,6 +1637,11 @@ impl PlexiApp {
                     }
                 },
                 ShellEvent::ClearOverlay => self.clear_overlay(),
+                ShellEvent::Snip => {
+                    if !matches!(&self.mode, Mode::Overlay(o) if o.snip.is_some()) {
+                        self.start_snip(ctx);
+                    }
+                }
                 ShellEvent::ShowNotebook => {
                     if self.is_overlay() {
                         self.exit_overlay(ctx);
@@ -1390,6 +1688,20 @@ impl PlexiApp {
             }
             return;
         }
+        if matches!(&self.mode, Mode::Overlay(o) if o.snip.is_some()) {
+            if plain(Key::Escape) {
+                self.cancel_snip(ctx);
+            }
+            return;
+        }
+        if self.crop.is_some() {
+            if plain(Key::Enter) {
+                self.finish_crop(true);
+            }
+            if plain(Key::Escape) {
+                self.finish_crop(false);
+            }
+        }
         if cmd_shift(Key::Z) || cmd(Key::Y) {
             self.redo();
         } else if cmd(Key::Z) {
@@ -1408,6 +1720,12 @@ impl PlexiApp {
         }
         if cmd(Key::E) {
             self.open_export_dialog();
+        }
+        if cmd(Key::P) {
+            self.open_export_dialog();
+            if let Some(d) = &mut self.export {
+                d.format = ExportFormat::Pdf;
+            }
         }
         if cmd(Key::A) {
             self.select_all();
@@ -1550,6 +1868,8 @@ impl PlexiApp {
             custom_in: [8.5, 11.0],
             tile: infinite,
             margin_in: 0.0,
+            pick_pages: false,
+            page_list: String::new(),
             preview: Default::default(),
         });
     }
@@ -1591,6 +1911,7 @@ impl eframe::App for PlexiApp {
                 o.hint_until = 0.0; // nothing to explain at login
             }
         }
+        self.fonts.begin_frame();
         self.poll_jobs();
         if self.update_quit {
             ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -1598,6 +1919,16 @@ impl eframe::App for PlexiApp {
         self.handle_shell_events(&ctx);
         self.drive_overlay(&ctx);
         self.handle_drops_and_paste(&ctx);
+        if let Some((bytes, n)) = self.pending_image.take() {
+            // Wait until the notebook window is back to its size, so the snip lands in view.
+            let back = matches!(self.mode, Mode::Notebook) && self.restore_rect.is_none();
+            if back && n == 0 {
+                self.insert_image(bytes, None, &ctx);
+            } else {
+                self.pending_image = Some((bytes, if back { n - 1 } else { n }));
+                ctx.request_repaint();
+            }
+        }
 
         let rect = ui.max_rect();
         let hidden = self.hide_for_capture();
@@ -1890,6 +2221,110 @@ mod tests {
         assert!(h.app.selection.contains(&id), "unlocked images can be clicked again");
     }
 
+    fn key(k: Key) -> Event {
+        Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }
+    }
+
+    #[test]
+    fn cropping_an_image() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.insert_image(png(100, 50), None, &ctx);
+        h.step(vec![]);
+        let img = image_el(&h);
+        h.app.start_crop(Target::Page(0), img.id);
+        assert!(h.app.crop.is_some());
+        let view = h.app.view;
+        // Drag the left edge's handle 40 points to the right.
+        let left = view.to_screen(h.app.canvas_origin, [img.pos[0], img.pos[1] + 25.0]);
+        h.drag(PointerButton::Primary, &[(left.x, left.y), (left.x + 20.0, left.y), (left.x + 40.0, left.y)]);
+        h.step(vec![key(Key::Enter)]);
+        h.step(vec![]);
+        assert!(h.app.crop.is_none(), "Enter applies the crop");
+        let cropped = image_el(&h);
+        let cut = 40.0 / view.zoom;
+        assert!((cropped.size[0] - (100.0 - cut)).abs() < 0.5, "{:?}", cropped.size);
+        assert!((cropped.pos[0] - (img.pos[0] + cut)).abs() < 0.5);
+        let [l, _, r, _] = cropped.crop.expect("a crop");
+        assert!((l - cut / 100.0).abs() < 0.01 && (r - 1.0).abs() < 1e-3, "{l} {r}");
+        assert!(h.app.selection.contains(&cropped.id));
+
+        // Esc leaves a crop alone; undo and "Remove crop" bring the whole picture back.
+        h.app.start_crop(Target::Page(0), cropped.id);
+        h.step(vec![key(Key::Escape)]);
+        assert_eq!(image_el(&h).crop, cropped.crop);
+        h.app.remove_crop(Target::Page(0), cropped.id);
+        let whole = image_el(&h);
+        assert_eq!(whole.crop, None);
+        assert!((whole.size[0] - 100.0).abs() < 0.01 && (whole.pos[0] - img.pos[0]).abs() < 0.01);
+        h.app.undo();
+        h.app.undo();
+        assert_eq!(image_el(&h).crop, None);
+        assert_eq!(image_el(&h).size, [100.0, 50.0]);
+    }
+
+    #[test]
+    fn styling_text() {
+        let mut h = Harness::new();
+        h.app.tool = Tool::Text;
+        h.click(300.0, 400.0);
+        h.step(vec![Event::Text("hi".into())]);
+        // The style controls change the box being typed in, and the style of new boxes.
+        h.app.apply_text_style(|t| {
+            t.size = 32.0;
+            t.underline = true;
+        });
+        h.step(vec![]);
+        assert!(h.app.editing_text.is_some(), "still typing after a style change");
+        h.click(700.0, 650.0);
+        h.step(vec![]);
+        let Some(Element::Text(t)) = h.elements().first().cloned() else { panic!("a text box") };
+        assert_eq!((t.text.as_str(), t.size, t.underline), ("hi", 32.0, true));
+        assert_eq!(h.app.config.text_size, 32.0);
+
+        // Double-click it with the select tool to edit it again.
+        h.app.tool = Tool::Lasso;
+        let at = h.app.view.to_screen(h.app.canvas_origin, [t.pos[0] + 10.0, t.pos[1] + 10.0]);
+        h.click(at.x, at.y);
+        h.click(at.x, at.y);
+        assert!(h.app.editing_text.is_some(), "double-click edits the text");
+        h.step(vec![key(Key::Escape)]);
+        assert!(h.app.editing_text.is_none());
+
+        // A style change on a selected box is one undo step.
+        h.app.select_all();
+        h.app.apply_text_style(|t| t.bold = true);
+        assert!(matches!(h.elements().first(), Some(Element::Text(t)) if t.bold));
+        assert_eq!(h.app.selection.len(), 1, "the restyled box stays selected");
+        h.app.undo();
+        assert!(matches!(h.elements().first(), Some(Element::Text(t)) if !t.bold));
+    }
+
+    #[test]
+    fn snipping_from_the_notebook() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.start_snip(&ctx);
+        h.step(vec![]);
+        assert!(matches!(&h.app.mode, Mode::Overlay(o) if o.snip.is_some()));
+        h.drag(PointerButton::Primary, &[(100.0, 100.0), (200.0, 180.0), (300.0, 250.0)]);
+        assert!(h.app.doc.overlay.elements.is_empty(), "dragging picks an area instead of drawing");
+        let Mode::Overlay(o) = &mut h.app.mode else { panic!("still on screen") };
+        let rect = o.snip.and_then(|s| s.rect).expect("the picked area");
+        assert_eq!(rect, egui::Rect::from_min_max(pos2(100.0, 100.0), pos2(300.0, 250.0)));
+        assert!(o.snapshot.is_some(), "a screenshot is on its way");
+        // Stand in for the screenshot instead of capturing the real screen.
+        o.snapshot = None;
+        let shot = image::RgbaImage::from_pixel(1000, 800, image::Rgba([10, 120, 200, 255]));
+        h.app.finish_snapshot(&ctx, SnapshotAction::Snip, shot);
+        assert!(!h.app.is_overlay(), "back to the notebook");
+        for _ in 0..8 {
+            h.step(vec![]);
+        }
+        let img = image_el(&h);
+        assert_eq!(img.size, [200.0, 150.0], "the snip lands on the page");
+    }
+
     #[test]
     fn right_click_opens_the_menu_and_right_drag_still_erases() {
         let mut h = Harness::new();
@@ -1979,5 +2414,13 @@ mod tests {
         let dlg = h.app.export.as_ref().unwrap();
         assert_eq!(dlg.preview.frame_count(), 2, "PDF export defaults to one sheet per outline");
         assert!(dlg.preview.ready(), "the preview rendered");
+        // Pick just sheet 2.
+        let dlg = h.app.export.as_mut().unwrap();
+        dlg.pick_pages = true;
+        dlg.page_list = "2".into();
+        h.step(vec![]);
+        let dlg = h.app.export.as_ref().unwrap();
+        assert_eq!((dlg.preview.frame_count(), dlg.preview.total()), (1, 2));
+        assert_eq!(dlg.pick(2), Ok(Some(vec![1])));
     }
 }

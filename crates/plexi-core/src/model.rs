@@ -177,9 +177,41 @@ pub struct TextBox {
     pub text: String,
     pub size: f32,
     pub color: Color,
+    /// Font family; `None` is the editor's default font ([`DEFAULT_FONT`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub underline: bool,
 }
 
+/// The font text boxes use unless another is picked. It is bundled, so it looks the same
+/// everywhere; it has no bold or italic faces.
+pub const DEFAULT_FONT: &str = "Ubuntu";
+
 impl TextBox {
+    /// A plain text box in the default font.
+    pub fn new(pos: [f32; 2], text: impl Into<String>, size: f32, color: Color) -> Self {
+        Self {
+            id: new_id(),
+            pos,
+            text: text.into(),
+            size,
+            color,
+            font: None,
+            bold: false,
+            italic: false,
+            underline: false,
+        }
+    }
+
+    pub fn family(&self) -> &str {
+        self.font.as_deref().unwrap_or(DEFAULT_FONT)
+    }
+
     /// Vertical distance between lines. Shared by the editor and every exporter.
     pub fn line_height(&self) -> f32 {
         self.size * LINE_HEIGHT
@@ -190,7 +222,8 @@ impl TextBox {
     pub fn approx_bounds(&self) -> Rect {
         let lines: Vec<&str> = self.text.split('\n').collect();
         let widest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0).max(1);
-        let w = widest as f32 * self.size * 0.55;
+        let advance = if self.bold { 0.6 } else { 0.55 };
+        let w = widest as f32 * self.size * advance;
         let h = lines.len().max(1) as f32 * self.line_height();
         Rect::from_min_size(self.pos, [w, h])
     }
@@ -212,6 +245,50 @@ pub struct ImageEl {
     /// Locked images can't be selected, moved or resized until unlocked (right-click).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub locked: bool,
+    /// The part of the picture that shows, as fractions of its width and height:
+    /// `[left, top, right, bottom]`. `None` shows all of it. `pos`/`size` are always the
+    /// shown part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<[f32; 4]>,
+}
+
+impl ImageEl {
+    pub fn new(asset: String, pos: [f32; 2], size: [f32; 2]) -> Self {
+        Self { id: new_id(), asset, pos, size, locked: false, crop: None }
+    }
+
+    /// The crop as `[left, top, right, bottom]` fractions, the whole picture if uncropped.
+    pub fn crop_or_full(&self) -> [f32; 4] {
+        self.crop.unwrap_or([0.0, 0.0, 1.0, 1.0])
+    }
+
+    /// Where the whole, uncropped picture would be, in page units.
+    pub fn full_rect(&self) -> Rect {
+        let [l, t, r, b] = self.crop_or_full();
+        let fw = self.size[0] / (r - l).max(1e-4);
+        let fh = self.size[1] / (b - t).max(1e-4);
+        Rect::from_min_size([self.pos[0] - l * fw, self.pos[1] - t * fh], [fw, fh])
+    }
+
+    /// Show only `shown` (page units, inside [`Self::full_rect`]) of the picture.
+    pub fn set_crop(&mut self, shown: Rect) {
+        let full = self.full_rect();
+        let fx = |x: f32| ((x - full.min[0]) / full.width().max(1e-4)).clamp(0.0, 1.0);
+        let fy = |y: f32| ((y - full.min[1]) / full.height().max(1e-4)).clamp(0.0, 1.0);
+        let c = [fx(shown.min[0]), fy(shown.min[1]), fx(shown.max[0]), fy(shown.max[1])];
+        let whole = c[0] < 1e-3 && c[1] < 1e-3 && c[2] > 1.0 - 1e-3 && c[3] > 1.0 - 1e-3;
+        self.crop = (!whole).then_some(c);
+        self.pos = shown.min;
+        self.size = [shown.width(), shown.height()];
+    }
+
+    /// Show the whole picture again, at the scale it is shown now.
+    pub fn uncrop(&mut self) {
+        let full = self.full_rect();
+        self.crop = None;
+        self.pos = full.min;
+        self.size = [full.width(), full.height()];
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -551,6 +628,22 @@ mod tests {
             Element::Stroke(b) => assert_eq!(b.points.len(), 2),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn cropping_keeps_the_picture_in_place() {
+        let mut img = ImageEl::new("a.png".into(), [100.0, 100.0], [200.0, 100.0]);
+        img.set_crop(Rect::from_min_size([150.0, 120.0], [100.0, 50.0]));
+        assert_eq!(img.crop, Some([0.25, 0.2, 0.75, 0.7]));
+        assert_eq!((img.pos, img.size), ([150.0, 120.0], [100.0, 50.0]));
+        let full = img.full_rect();
+        assert!((full.min[0] - 100.0).abs() < 1e-3 && (full.width() - 200.0).abs() < 1e-3, "{full:?}");
+        // Cropping again works from the whole picture, not the current crop.
+        img.set_crop(full);
+        assert_eq!(img.crop, None);
+        img.set_crop(Rect::from_min_size([100.0, 100.0], [100.0, 100.0]));
+        img.uncrop();
+        assert_eq!((img.pos, img.size, img.crop), ([100.0, 100.0], [200.0, 100.0], None));
     }
 
     #[test]

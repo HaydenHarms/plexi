@@ -169,9 +169,16 @@ pub(crate) fn element_svg(out: &mut String, el: &Element, assets: &Assets, opts:
         },
         Element::Text(t) if !opts.text || t.text.trim().is_empty() => {}
         Element::Text(t) => {
+            let family = match &t.font {
+                Some(f) => format!("'{}', {FONT_FAMILY}", esc(&f.replace('\'', ""))),
+                None => FONT_FAMILY.to_owned(),
+            };
             let _ = write!(
                 out,
-                "<text font-family=\"{FONT_FAMILY}\" font-weight=\"300\" font-size=\"{}\" fill=\"{}\"{} xml:space=\"preserve\">",
+                "<text font-family=\"{family}\" font-weight=\"{}\"{}{} font-size=\"{}\" fill=\"{}\"{} xml:space=\"preserve\">",
+                crate::fonts::weight(t.family(), t.bold),
+                if t.italic { " font-style=\"italic\"" } else { "" },
+                if t.underline { " text-decoration=\"underline\"" } else { "" },
                 n(t.size),
                 t.color.hex_rgb(),
                 opacity_attr("fill-opacity", t.color),
@@ -181,6 +188,25 @@ pub(crate) fn element_svg(out: &mut String, el: &Element, assets: &Assets, opts:
                 let _ = write!(out, "<tspan x=\"{}\" y=\"{}\">{}</tspan>", n(t.pos[0]), n(y), esc(line));
             }
             out.push_str("</text>\n");
+        }
+        Element::Image(img) if img.crop.is_some() => {
+            // A nested viewport clips the whole picture to the shown part.
+            if let Some(bytes) = assets.get(&img.asset) {
+                let full = img.full_rect();
+                let _ = writeln!(
+                    out,
+                    "<svg x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" overflow=\"hidden\"><image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" xlink:href=\"{}\"/></svg>",
+                    n(img.pos[0]),
+                    n(img.pos[1]),
+                    n(img.size[0]),
+                    n(img.size[1]),
+                    n(full.min[0] - img.pos[0]),
+                    n(full.min[1] - img.pos[1]),
+                    n(full.width()),
+                    n(full.height()),
+                    data_uri(bytes)
+                );
+            }
         }
         Element::Image(img) => {
             if let Some(bytes) = assets.get(&img.asset) {

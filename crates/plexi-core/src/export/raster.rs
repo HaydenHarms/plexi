@@ -134,6 +134,45 @@ mod tests {
     }
 
     #[test]
+    fn cropped_images_show_only_the_crop() {
+        // Left half red, right half blue.
+        let mut pic = image::RgbaImage::from_pixel(20, 10, image::Rgba([255, 0, 0, 255]));
+        for x in 10..20 {
+            for y in 0..10 {
+                pic.put_pixel(x, y, image::Rgba([0, 0, 255, 255]));
+            }
+        }
+        let mut png = Cursor::new(Vec::new());
+        pic.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let mut assets = Assets::new();
+        assets.insert("p.png".into(), std::sync::Arc::new(png.into_inner()));
+        let mut page = Page::new("p", PageSize::Custom([100.0, 100.0]));
+        let mut img = ImageEl::new("p.png".into(), [0.0, 0.0], [100.0, 50.0]);
+        img.set_crop(Rect::from_min_size([50.0, 0.0], [50.0, 50.0])); // the blue half
+        img.pos = [10.0, 10.0];
+        page.elements.push(Element::Image(img));
+        let img = page_rgba(&page, &assets, &RenderOptions { scale: 1.0, ..Default::default() }).unwrap();
+        assert_eq!(img.get_pixel(35, 35).0, [0, 0, 255, 255], "inside the crop");
+        assert_eq!(img.get_pixel(5, 35).0, [255, 255, 255, 255], "the red half is cut off");
+        assert_eq!(img.get_pixel(70, 35).0, [255, 255, 255, 255], "nothing past the crop");
+    }
+
+    #[test]
+    fn text_styles_reach_the_svg() {
+        let mut t = TextBox::new([0.0, 0.0], "hi", 20.0, Color::BLACK);
+        t.font = Some("Georgia".into());
+        t.bold = true;
+        t.italic = true;
+        t.underline = true;
+        let mut page = Page::new("p", PageSize::Custom([100.0, 100.0]));
+        page.elements.push(Element::Text(t));
+        let svg = svg::page_svg(&page, &Assets::new(), &RenderOptions::default());
+        assert!(svg.contains("font-family=\"'Georgia', Ubuntu"), "{svg}");
+        assert!(svg.contains("font-weight=\"700\" font-style=\"italic\" text-decoration=\"underline\""), "{svg}");
+        assert!(parse_svg(&svg).is_ok());
+    }
+
+    #[test]
     fn highlighter_is_even() {
         let mut page = Page::new("p", PageSize::Custom([100.0, 100.0]));
         page.paper = Color::TRANSPARENT;

@@ -11,7 +11,7 @@ pub mod text;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use resvg::usvg;
 
@@ -43,11 +43,14 @@ pub struct RenderOptions {
     pub text: bool,
     /// Which part of the page goes on which sheets.
     pub layout: layout::Layout,
+    /// Only these output pages (0-based, counted across every exported page). `None`
+    /// writes them all.
+    pub pick: Option<Vec<usize>>,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        Self { scale: 2.0, background: true, text: true, layout: layout::Layout::default() }
+        Self { scale: 2.0, background: true, text: true, layout: layout::Layout::default(), pick: None }
     }
 }
 
@@ -55,6 +58,18 @@ impl RenderOptions {
     /// The output pages `page` becomes under these options.
     pub fn frames(&self, page: &Page) -> Vec<layout::Frame> {
         layout::frames(page, &self.layout)
+    }
+
+    /// Every output page of an export of `pages`, in order, with the page each one
+    /// shows; only the picked ones when [`Self::pick`] is set.
+    pub fn outputs<'a>(&self, pages: &[&'a Page]) -> Vec<(&'a Page, layout::Frame)> {
+        pages
+            .iter()
+            .flat_map(|p| self.frames(p).into_iter().map(move |f| (*p, f)))
+            .enumerate()
+            .filter(|(i, _)| self.pick.as_ref().is_none_or(|k| k.contains(i)))
+            .map(|(_, o)| o)
+            .collect()
     }
 }
 
@@ -175,8 +190,10 @@ pub fn export(
     }
     let assets = &doc.assets;
     if format.one_page_per_file() {
-        let outputs: Vec<(&Page, layout::Frame)> =
-            pages.iter().flat_map(|p| opts.frames(p).into_iter().map(move |f| (*p, f))).collect();
+        let outputs = opts.outputs(pages);
+        if outputs.is_empty() {
+            return Err(ExportError::Other("no pages picked".into()));
+        }
         let mut written = Vec::new();
         for (i, (page, frame)) in outputs.iter().enumerate() {
             let target = if outputs.len() == 1 { path.to_path_buf() } else { numbered(path, i + 1) };
@@ -214,22 +231,8 @@ pub fn numbered(path: &Path, n: usize) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// The font database used for every SVG render: system fonts plus the font the editor
-/// draws text with, so exported text lines up with what is on screen.
-pub(crate) fn fontdb() -> Arc<usvg::fontdb::Database> {
-    static DB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-    DB.get_or_init(|| {
-        let mut db = usvg::fontdb::Database::new();
-        db.load_font_data(epaint_default_fonts::UBUNTU_LIGHT.to_vec());
-        db.load_system_fonts();
-        db.set_sans_serif_family("Ubuntu");
-        Arc::new(db)
-    })
-    .clone()
-}
-
 pub(crate) fn parse_svg(svg: &str) -> Result<usvg::Tree, ExportError> {
-    let opts = usvg::Options { fontdb: fontdb(), ..Default::default() };
+    let opts = usvg::Options { fontdb: crate::fonts::database(), ..Default::default() };
     usvg::Tree::from_str(svg, &opts).map_err(|e| ExportError::Svg(e.to_string()))
 }
 
@@ -259,19 +262,19 @@ mod tests {
             width: 18.0,
             points: vec![InkPoint::new(80.0, 300.0, 0.5), InkPoint::new(400.0, 300.0, 0.5)],
         }));
-        p.elements.push(Element::Text(TextBox {
-            id: new_id(),
-            pos: [100.0, 400.0],
-            text: "Hello <Plexi> & friends\nsecond line".into(),
-            size: 24.0,
-            color: Color::BLACK,
-        }));
+        p.elements.push(Element::Text(TextBox::new(
+            [100.0, 400.0],
+            "Hello <Plexi> & friends\nsecond line",
+            24.0,
+            Color::BLACK,
+        )));
         p.elements.push(Element::Image(ImageEl {
             id: new_id(),
             asset,
             pos: [500.0, 500.0],
             size: [40.0, 40.0],
             locked: false,
+            crop: None,
         }));
         for kind in [ShapeKind::Line, ShapeKind::Arrow, ShapeKind::Rect, ShapeKind::Ellipse] {
             p.elements.push(Element::Shape(Shape {
@@ -285,13 +288,7 @@ mod tests {
         }
         let mut p2 = Page::new("Infinite", PageSize::Infinite);
         p2.background = Background::Dots;
-        p2.elements.push(Element::Text(TextBox {
-            id: new_id(),
-            pos: [-500.0, -300.0],
-            text: "far away".into(),
-            size: 16.0,
-            color: Color::BLACK,
-        }));
+        p2.elements.push(Element::Text(TextBox::new([-500.0, -300.0], "far away", 16.0, Color::BLACK)));
         d.pages.push(p2);
         d
     }
@@ -320,6 +317,12 @@ mod tests {
             "two pages"
         );
         assert!(dir.join("out-2.png").exists());
+        // Only the picked output pages are written.
+        let opts = RenderOptions { scale: 0.25, pick: Some(vec![1]), ..Default::default() };
+        let one = export(&d, &pages, ExportFormat::Pdf, &opts, &dir.join("pick.pdf")).unwrap();
+        let pdf = std::fs::read(&one[0]).unwrap();
+        let pages_in = count(&pdf, b"/Type /Page") - count(&pdf, b"/Type /Pages");
+        assert_eq!(pages_in, 1);
         assert!(dir.join("out_files").join("page-1.png").exists());
         let html = std::fs::read_to_string(dir.join("out.html")).unwrap();
         assert!(html.contains("&lt;Plexi&gt; &amp; friends"));

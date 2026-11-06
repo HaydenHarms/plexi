@@ -60,6 +60,8 @@ pub struct Config {
     pub paper_fills_canvas: bool,
     /// Outline the sheets that hold something on infinite pages.
     pub sheet_guides: bool,
+    /// Number those sheets (the numbers the export dialog's page list uses).
+    pub sheet_numbers: bool,
     /// Sheet size for those outlines and the export default: an index into `PAPERS`.
     pub sheet_paper: usize,
     pub sheet_landscape: bool,
@@ -69,6 +71,14 @@ pub struct Config {
     pub hotkey_clear: String,
     /// Leave overlay mode and return to the notebook.
     pub hotkey_notebook: String,
+    /// Snip an area of the screen from anywhere.
+    pub hotkey_snip: String,
+    /// Style for new text boxes: font family (`None` is the default font), size, styles.
+    pub text_font: Option<String>,
+    pub text_size: f32,
+    pub text_bold: bool,
+    pub text_italic: bool,
+    pub text_underline: bool,
     /// Keep overlay ink when leaving overlay mode.
     pub keep_overlay_ink: bool,
     pub autosave: bool,
@@ -109,11 +119,18 @@ impl Default for Config {
             new_page_paper: Color::WHITE,
             paper_fills_canvas: true,
             sheet_guides: true,
+            sheet_numbers: true,
             sheet_paper: 0,
             sheet_landscape: false,
             hotkey_draw: "Ctrl+Alt+D".into(),
             hotkey_clear: "Ctrl+Alt+X".into(),
             hotkey_notebook: "Ctrl+Alt+N".into(),
+            hotkey_snip: "Ctrl+Alt+S".into(),
+            text_font: None,
+            text_size: 20.0,
+            text_bold: false,
+            text_italic: false,
+            text_underline: false,
             keep_overlay_ink: true,
             autosave: true,
             check_updates: true,

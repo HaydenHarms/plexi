@@ -141,19 +141,14 @@ mod tests {
             width: 3.0,
             points: vec![InkPoint::new(10.0, 10.0, 0.4), InkPoint::new(50.0, 60.0, 0.9)],
         }));
-        p.elements.push(Element::Text(TextBox {
-            id: new_id(),
-            pos: [100.0, 100.0],
-            text: "hello\nworld".into(),
-            size: 20.0,
-            color: Color::BLACK,
-        }));
+        p.elements.push(Element::Text(TextBox::new([100.0, 100.0], "hello\nworld", 20.0, Color::BLACK)));
         p.elements.push(Element::Image(ImageEl {
             id: new_id(),
             asset,
             pos: [0.0, 0.0],
             size: [10.0, 10.0],
             locked: true,
+            crop: None,
         }));
         d.overlay.elements.push(Element::Shape(Shape {
             id: new_id(),

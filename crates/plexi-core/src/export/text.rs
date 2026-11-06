@@ -51,10 +51,15 @@ pub fn html(title: &str, pages: &[&Page], assets: &Assets, opts: &RenderOptions)
         svg::esc(title),
         svg::esc(title)
     );
+    let outputs = opts.outputs(pages);
     for page in pages {
+        let frames: Vec<_> = outputs.iter().filter(|(p, _)| std::ptr::eq(*p, *page)).collect();
+        if frames.is_empty() {
+            continue;
+        }
         let _ = writeln!(out, "<section>\n<h2>{}</h2>", svg::esc(&page.name));
-        for frame in opts.frames(page) {
-            out.push_str(&svg::frame_svg(page, assets, opts, &frame));
+        for (_, frame) in frames {
+            out.push_str(&svg::frame_svg(page, assets, opts, frame));
         }
         out.push_str("</section>\n");
     }
@@ -77,13 +82,18 @@ pub fn markdown(
     let mut written = Vec::new();
     let mut md = format!("# {title}\n");
     let mut k = 0;
+    let outputs = opts.outputs(pages);
     for page in pages {
+        let frames: Vec<_> = outputs.iter().filter(|(p, _)| std::ptr::eq(*p, *page)).collect();
+        if frames.is_empty() && opts.pick.is_some() {
+            continue;
+        }
         let _ = write!(md, "\n## {}\n", page.name);
-        for frame in opts.frames(page) {
+        for (_, frame) in frames {
             k += 1;
             let file = format!("page-{k}.png");
             let img = dir.join(&file);
-            std::fs::write(&img, raster::frame_bytes(page, assets, opts, &frame, ExportFormat::Png)?)?;
+            std::fs::write(&img, raster::frame_bytes(page, assets, opts, frame, ExportFormat::Png)?)?;
             written.push(img);
             let _ = write!(md, "\n![{}]({}/{})\n", page.name, dir_name.replace(' ', "%20"), file);
         }

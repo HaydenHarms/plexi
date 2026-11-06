@@ -16,6 +16,7 @@ Usage:
   plexi --background           Start hidden; press the draw hotkey to begin
   plexi export IN.plexi OUT [--page N | --all | --screen] [--scale S] [--no-background]
                            [--paper NAME [--landscape] [--tile]] [--trim] [--margin INCHES]
+                           [--sheets LIST]
 
 OUT's extension picks the format: pdf png jpg webp bmp tiff svg html md txt
 excalidraw drawio inkml json. Raster and SVG exports of several pages write
@@ -23,7 +24,8 @@ OUT-1.ext, OUT-2.ext, …
 
 --paper puts each page on a sheet (letter, a4, legal, tabloid, a5, a3, slide),
 shrunk to fit; with --tile it is split across sheets at full size instead.
---trim exports only the drawn area.";
+--trim exports only the drawn area. --sheets keeps only some of the output pages,
+counted across the whole export: --sheets 1,3,5-7.";
 
 pub fn is_cli(args: &[String]) -> bool {
     matches!(args.first().map(String::as_str), Some("export" | "--help" | "-h" | "help" | "--version" | "-V"))
@@ -61,6 +63,7 @@ fn export_cmd(args: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut screen = false;
     let mut opts = RenderOptions::default();
     let mut landscape = false;
+    let mut sheets: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -83,6 +86,7 @@ fn export_cmd(args: &[String]) -> Result<Vec<PathBuf>, String> {
                 let n: usize = it.next().and_then(|v| v.parse().ok()).ok_or("--page needs a number")?;
                 page = Some(n.max(1) - 1);
             }
+            "--sheets" => sheets = Some(it.next().ok_or("--sheets needs a list like 1,3,5-7")?.clone()),
             "--scale" => opts.scale = it.next().and_then(|v| v.parse().ok()).ok_or("--scale needs a number")?,
             s if s.starts_with("--") => return Err(format!("unknown option {s}\n\n{USAGE}")),
             _ => positional.push(PathBuf::from(a)),
@@ -103,5 +107,10 @@ fn export_cmd(args: &[String]) -> Result<Vec<PathBuf>, String> {
         let i = page.unwrap_or(0);
         vec![doc.pages.get(i).ok_or_else(|| format!("there is no page {}", i + 1))?]
     };
+    if let Some(list) = sheets {
+        let total = opts.outputs(&pages).len();
+        opts.pick =
+            Some(plexi_core::export::layout::parse_page_list(&list, total).map_err(|e| format!("--sheets: {e}"))?);
+    }
     export(&doc, &pages, fmt, &opts, output).map_err(|e| e.to_string())
 }

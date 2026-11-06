@@ -8,16 +8,21 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use egui::epaint::{Vertex, WHITE_UV};
+use egui::text::{LayoutJob, TextFormat};
 use egui::{
-    Align2, Color32, CursorIcon, Event, FontId, Id, Key, Margin, Order, PointerButton, Pos2, Rect, Sense,
+    Align2, Color32, CursorIcon, Event, FontId, Galley, Id, Key, Margin, Order, PointerButton, Pos2, Rect, Sense,
     Shape as EShape, Stroke as EStroke, StrokeKind, TextEdit, Ui, Vec2, pos2, vec2,
 };
 use plexi_core::export::svg::{Mark, background_marks};
 use plexi_core::geom::{dist, dist_to_segment, point_in_polygon};
 use plexi_core::ink::{self, StrokeBuilder};
-use plexi_core::{Color, Element, InkKind, Page, RULE_SPACING, Shape, ShapeKind, Stroke, TextBox, new_id, rule_color};
+use plexi_core::{
+    BASELINE, Color, Element, InkKind, LINE_HEIGHT, Page, RULE_SPACING, Shape, ShapeKind, Stroke, TextBox, new_id,
+    rule_color,
+};
 
 use crate::app::{ContextMenu, Mode, PlexiApp, Tool};
+use crate::fonts::FontBook;
 use crate::history::Target;
 
 /// Maps page units to screen points: `screen = origin + offset + page * zoom`.
@@ -99,6 +104,37 @@ type Handle = (u64, [f32; 2], [f32; 2], [f32; 2]);
 
 /// Screen distance within which a resize handle catches the pointer.
 const HANDLE_REACH: f32 = 10.0;
+
+/// An image being cropped: the whole picture (`full`) and the part that will show.
+#[derive(Clone, Debug)]
+pub struct CropState {
+    pub target: Target,
+    pub id: u64,
+    pub full: plexi_core::Rect,
+    pub shown: plexi_core::Rect,
+    pub drag: Option<CropDrag>,
+}
+
+/// A crop edge being dragged. `edge` is -1/0/1 per axis (left/none/right, top/none/
+/// bottom); `[0, 0]` moves the crop window over the picture.
+#[derive(Clone, Copy, Debug)]
+pub struct CropDrag {
+    pub edge: [i8; 2],
+    pub start: [f32; 2],
+    pub orig: plexi_core::Rect,
+}
+
+/// The eight crop handles: corners and edge middles.
+const CROP_EDGES: [[i8; 2]; 8] = [[-1, -1], [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0]];
+
+fn edge_point(r: Rect, e: [i8; 2]) -> Pos2 {
+    let pick = |lo: f32, hi: f32, k: i8| match k {
+        -1 => lo,
+        1 => hi,
+        _ => (lo + hi) / 2.0,
+    };
+    pos2(pick(r.left(), r.right(), e[0]), pick(r.top(), r.bottom(), e[1]))
+}
 
 /// Tessellated strokes, keyed by element id. Meshes are rebuilt when the zoom moves to
 /// a different half-octave so curves stay smooth without re-tessellating every frame.
@@ -204,8 +240,10 @@ pub struct PaintInput<'a> {
     pub skip: Option<u64>,
     pub moving: Option<(&'a HashSet<u64>, [f32; 2])>,
     pub canvas_bg: Color32,
-    /// Sheet outlines to draw on an infinite page.
+    /// Sheets in use on an infinite page, and whether to outline and number them.
     pub sheets: &'a [plexi_core::Rect],
+    pub sheet_lines: bool,
+    pub sheet_numbers: bool,
 }
 
 pub fn paint_shape(painter: &egui::Painter, s: &Shape, view: View, origin: Pos2, delta: [f32; 2]) {
@@ -237,8 +275,33 @@ pub fn paint_shape(painter: &egui::Painter, s: &Shape, view: View, origin: Pos2,
     }
 }
 
-pub fn text_font(t: &TextBox, zoom: f32) -> FontId {
-    FontId::proportional((t.size * zoom).max(1.0))
+/// The format text box `t` is drawn with at `zoom`.
+fn text_format(fonts: &mut FontBook, ctx: &egui::Context, t: &TextBox, zoom: f32) -> TextFormat {
+    let size = (t.size * zoom).max(1.0);
+    let color = color32(t.color);
+    TextFormat {
+        font_id: FontId::new(size, fonts.family(ctx, t)),
+        color,
+        line_height: Some(t.size * LINE_HEIGHT * zoom),
+        underline: if t.underline { EStroke::new((size / 14.0).max(1.0), color) } else { EStroke::NONE },
+        ..Default::default()
+    }
+}
+
+fn layout(ui: &Ui, text: &str, format: &TextFormat) -> Arc<Galley> {
+    let job = LayoutJob::single_section(text.to_owned(), format.clone());
+    ui.fonts_mut(|f| f.layout_job(job))
+}
+
+/// Text box `t` (showing `text`) laid out at `zoom`, and where the galley's top-left
+/// goes relative to the box position: lines sit `LINE_HEIGHT` apart with the first
+/// baseline at `BASELINE`, exactly where the exporters put them, whatever the font.
+pub fn text_layout(ui: &Ui, fonts: &mut FontBook, t: &TextBox, text: &str, zoom: f32) -> (Arc<Galley>, Vec2) {
+    let format = text_format(fonts, ui.ctx(), t, zoom);
+    let probe = layout(ui, "H", &format);
+    let baseline = probe.rows.first().and_then(|r| r.row.glyphs.first().map(|g| r.pos.y + g.pos.y));
+    let shift = t.size * BASELINE * zoom - baseline.unwrap_or(t.size * BASELINE * zoom);
+    (layout(ui, text, &format), vec2(0.0, shift))
 }
 
 pub fn paint_page(
@@ -246,6 +309,7 @@ pub fn paint_page(
     input: &PaintInput,
     cache: &mut MeshCache,
     textures: &mut HashMap<String, egui::TextureHandle>,
+    fonts: &mut FontBook,
 ) {
     let painter = ui.painter_at(input.clip);
     let ctx = ui.ctx();
@@ -299,9 +363,11 @@ pub fn paint_page(
             if !r.intersects(clip) {
                 continue;
             }
-            let c = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
-            painter.extend(EShape::dashed_line(&c, edge, 7.0, 5.0));
-            if r.width() > 120.0 {
+            if input.sheet_lines {
+                let c = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+                painter.extend(EShape::dashed_line(&c, edge, 7.0, 5.0));
+            }
+            if input.sheet_numbers && r.width() > 120.0 {
                 painter.text(
                     r.right_top() + vec2(-8.0, 6.0),
                     Align2::RIGHT_TOP,
@@ -338,7 +404,8 @@ pub fn paint_page(
             }
             Element::Text(t) => {
                 let pos = view.to_screen(origin, [t.pos[0] + delta[0], t.pos[1] + delta[1]]);
-                painter.text(pos, Align2::LEFT_TOP, &t.text, text_font(t, view.zoom), color32(t.color));
+                let (galley, shift) = text_layout(ui, fonts, t, &t.text, view.zoom);
+                painter.galley(pos + shift, galley, color32(t.color));
             }
             Element::Image(img) => {
                 let tex = textures.entry(img.asset.clone()).or_insert_with(|| {
@@ -360,7 +427,8 @@ pub fn paint_page(
                     origin,
                     plexi_core::Rect::from_min_size([img.pos[0] + delta[0], img.pos[1] + delta[1]], img.size),
                 );
-                painter.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                let [u0, v0, u1, v1] = img.crop_or_full();
+                painter.image(tex.id(), r, Rect::from_min_max(pos2(u0, v0), pos2(u1, v1)), Color32::WHITE);
             }
             Element::Shape(s) => paint_shape(&painter, s, view, origin, delta),
         }
@@ -507,6 +575,93 @@ impl PlexiApp {
         .map(|(_, anchor, dir)| (img.id, anchor, dir, img.size))
     }
 
+    // ----- cropping ------------------------------------------------------------------
+
+    /// Start cropping image `id`: its edges become handles over the whole picture.
+    pub fn start_crop(&mut self, t: Target, id: u64) {
+        self.finish_text_edit();
+        let Some(Element::Image(img)) = self.page_ref(t).elements.iter().find(|e| e.id() == id) else { return };
+        if img.locked {
+            return;
+        }
+        let shown = plexi_core::Rect::from_min_size(img.pos, img.size);
+        self.crop = Some(CropState { target: t, id, full: img.full_rect(), shown, drag: None });
+        self.selection.clear();
+        self.interaction = Interaction::Idle;
+        self.toast("Drag the edges to crop — Enter to apply, Esc to cancel");
+    }
+
+    /// End cropping, keeping the new crop if `apply`.
+    pub fn finish_crop(&mut self, apply: bool) {
+        let Some(c) = self.crop.take() else { return };
+        if self.toast.as_ref().is_some_and(|t| t.text.starts_with("Drag the edges")) {
+            self.toast = None;
+        }
+        let Some(i) = self.page_ref(c.target).find(c.id) else { return };
+        if apply && let Element::Image(img) = &self.page_ref(c.target).elements[i] {
+            let now = plexi_core::Rect::from_min_size(img.pos, img.size);
+            let moved =
+                (0..2).any(|k| (now.min[k] - c.shown.min[k]).abs() + (now.max[k] - c.shown.max[k]).abs() > 0.01);
+            if moved {
+                self.checkpoint(c.target);
+                let page = self.page_mut(c.target);
+                if let Element::Image(img) = &mut page.elements[i] {
+                    img.set_crop(c.shown);
+                }
+                page.elements[i].renew_id();
+            }
+        }
+        self.selection = [self.page_ref(c.target).elements[i].id()].into();
+    }
+
+    /// Show the whole of a cropped image again.
+    pub fn remove_crop(&mut self, t: Target, id: u64) {
+        self.checkpoint(t);
+        let page = self.page_mut(t);
+        let Some(i) = page.find(id) else { return };
+        if let Element::Image(img) = &mut page.elements[i] {
+            img.uncrop();
+        }
+        page.elements[i].renew_id();
+        self.selection = [page.elements[i].id()].into();
+    }
+
+    /// The crop handle under screen point `pos`: an edge, or `[0, 0]` inside the crop.
+    fn crop_handle_at(&self, view: View, origin: Pos2, pos: Pos2) -> Option<[i8; 2]> {
+        let c = self.crop.as_ref()?;
+        let r = view.rect_to_screen(origin, c.shown);
+        CROP_EDGES
+            .into_iter()
+            .find(|e| edge_point(r, *e).distance(pos) <= HANDLE_REACH)
+            .or_else(|| r.contains(pos).then_some([0, 0]))
+    }
+
+    fn drag_crop(&mut self, p: [f32; 2], zoom: f32) {
+        let Some(c) = &mut self.crop else { return };
+        let Some(d) = c.drag else { return };
+        let (dx, dy) = (p[0] - d.start[0], p[1] - d.start[1]);
+        let (full, mut r) = (c.full, d.orig);
+        let min = 8.0 / zoom;
+        if d.edge == [0, 0] {
+            let (w, h) = (r.width(), r.height());
+            let x = (r.min[0] + dx).clamp(full.min[0], (full.max[0] - w).max(full.min[0]));
+            let y = (r.min[1] + dy).clamp(full.min[1], (full.max[1] - h).max(full.min[1]));
+            r = plexi_core::Rect::from_min_size([x, y], [w, h]);
+        } else {
+            match d.edge[0] {
+                -1 => r.min[0] = (r.min[0] + dx).clamp(full.min[0], r.max[0] - min),
+                1 => r.max[0] = (r.max[0] + dx).clamp(r.min[0] + min, full.max[0]),
+                _ => {}
+            }
+            match d.edge[1] {
+                -1 => r.min[1] = (r.min[1] + dy).clamp(full.min[1], r.max[1] - min),
+                1 => r.max[1] = (r.max[1] + dy).clamp(r.min[1] + min, full.max[1]),
+                _ => {}
+            }
+        }
+        c.shown = r;
+    }
+
     /// Erase along the segment `from`-`to`; returns whether anything changed.
     fn erase_along(&mut self, t: Target, from: [f32; 2], to: [f32; 2], r: f32) -> bool {
         let steps = (dist(from, to) / (r * 0.5).max(0.5)).ceil().max(1.0) as usize;
@@ -566,6 +721,20 @@ impl PlexiApp {
             }
         }
         let p = view.to_page(origin, pos);
+        if self.crop.is_some() {
+            // While cropping, the left button works the crop; a press elsewhere applies it.
+            if button == PointerButton::Primary {
+                match self.crop_handle_at(view, origin, pos) {
+                    Some(edge) => {
+                        if let Some(c) = &mut self.crop {
+                            c.drag = Some(CropDrag { edge, start: p, orig: c.shown });
+                        }
+                    }
+                    None => self.finish_crop(true),
+                }
+            }
+            return;
+        }
         let notebook = matches!(self.mode, Mode::Notebook);
         if notebook && button == PointerButton::Primary && space {
             self.interaction = Interaction::Pan { last: pos };
@@ -631,17 +800,11 @@ impl PlexiApp {
         if let Some(id) = self.hit_text(t, p) {
             self.begin_text_edit(t, id);
         } else {
-            let size = 20.0;
             let snapshot = self.snapshot_of(t);
-            let id = new_id();
-            let color = self.pen_color_for_text();
-            self.page_mut(t).elements.push(Element::Text(TextBox {
-                id,
-                pos: [p[0], p[1] - size * 0.6],
-                text: String::new(),
-                size,
-                color,
-            }));
+            let mut tb = self.text_template(p);
+            tb.pos[1] -= tb.size * 0.6;
+            let id = tb.id;
+            self.page_mut(t).elements.push(Element::Text(tb));
             self.text_buf.clear();
             self.pending_snapshot = Some(snapshot);
             self.editing_text = Some((t, id));
@@ -652,6 +815,10 @@ impl PlexiApp {
     #[allow(clippy::too_many_arguments)]
     fn drag(&mut self, t: Target, view: View, origin: Pos2, pos: Pos2, time: f64, shift: bool) {
         let p = view.to_page(origin, pos);
+        if self.crop.as_ref().is_some_and(|c| c.drag.is_some()) {
+            self.drag_crop(p, view.zoom);
+            return;
+        }
         let mut inter = std::mem::replace(&mut self.interaction, Interaction::Idle);
         match &mut inter {
             Interaction::Idle => {}
@@ -714,6 +881,9 @@ impl PlexiApp {
     }
 
     fn end(&mut self, t: Target, view: View, shift: bool) {
+        if let Some(c) = &mut self.crop {
+            c.drag = None;
+        }
         match std::mem::replace(&mut self.interaction, Interaction::Idle) {
             Interaction::Idle | Interaction::Pan { .. } => {}
             Interaction::TextAt(p) => self.open_text_at(t, p),
@@ -804,6 +974,9 @@ impl PlexiApp {
     }
 
     fn tool_input(&mut self, ui: &Ui, rect: Rect, t: Target) {
+        if matches!(&self.mode, Mode::Overlay(o) if o.snip.is_some()) {
+            return;
+        }
         let ctx = ui.ctx().clone();
         let layer = ui.layer_id();
         let view = self.view_for(t);
@@ -852,11 +1025,27 @@ impl PlexiApp {
     }
 
     fn cursor(&self, ui: &Ui, rect: Rect, t: Target) {
+        if matches!(&self.mode, Mode::Overlay(o) if o.snip.is_some()) {
+            return;
+        }
         let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else { return };
         if !rect.contains(pos) || ui.ctx().layer_id_at(pos).is_some_and(|l| l != ui.layer_id()) {
             return;
         }
         let view = self.view_for(t);
+        if self.crop.as_ref().is_some_and(|c| c.target == t) {
+            let edge = self.crop.as_ref().and_then(|c| c.drag.map(|d| d.edge));
+            let icon = match edge.or_else(|| self.crop_handle_at(view, rect.min, pos)) {
+                Some([0, 0]) => CursorIcon::Move,
+                Some([0, _]) => CursorIcon::ResizeVertical,
+                Some([_, 0]) => CursorIcon::ResizeHorizontal,
+                Some([x, y]) if x == y => CursorIcon::ResizeNwSe,
+                Some(_) => CursorIcon::ResizeNeSw,
+                None => CursorIcon::Default,
+            };
+            ui.ctx().set_cursor_icon(icon);
+            return;
+        }
         let painter = ui.painter_at(rect);
         let erasing = self.tool == Tool::Eraser || matches!(self.interaction, Interaction::Erase { .. });
         let ring = |r: f32, c: Color32| {
@@ -911,6 +1100,20 @@ impl PlexiApp {
             self.view_input(ui, rect, &resp);
         }
         self.tool_input(ui, rect, t);
+        let double = ui.input(|i| {
+            i.pointer.button_double_clicked(PointerButton::Primary)
+                || i.pointer.button_triple_clicked(PointerButton::Primary)
+        });
+        if double && self.tool == Tool::Lasso && self.crop.is_none() {
+            // Double-click a text box with the select tool to edit it.
+            let on_canvas = |q: &Pos2| rect.contains(*q) && ui.ctx().layer_id_at(*q).is_none_or(|l| l == ui.layer_id());
+            let p =
+                ui.input(|i| i.pointer.interact_pos()).filter(on_canvas).map(|q| self.view_for(t).to_page(rect.min, q));
+            if let Some(id) = p.and_then(|p| self.hit_text(t, p)) {
+                self.selection.clear();
+                self.begin_text_edit(t, id);
+            }
+        }
 
         let view = self.view_for(t);
         let origin = rect.min;
@@ -918,7 +1121,11 @@ impl PlexiApp {
             Interaction::Move { delta, .. } => Some(*delta),
             _ => None,
         };
-        let skip = self.editing_text.filter(|(et, _)| *et == t).map(|(_, id)| id);
+        let skip = self.editing_text.filter(|(et, _)| *et == t).map(|(_, id)| id).or(self
+            .crop
+            .as_ref()
+            .filter(|c| c.target == t)
+            .map(|c| c.id));
         let sheets = self.sheets_for(t);
         {
             let input = PaintInput {
@@ -935,8 +1142,10 @@ impl PlexiApp {
                 moving: moving.map(|d| (&self.selection, d)),
                 canvas_bg,
                 sheets: &sheets,
+                sheet_lines: self.config.sheet_guides,
+                sheet_numbers: self.config.sheet_numbers,
             };
-            paint_page(ui, &input, &mut self.cache, &mut self.textures);
+            paint_page(ui, &input, &mut self.cache, &mut self.textures, &mut self.fonts);
         }
         self.paint_live(ui, rect, t);
         self.cursor(ui, rect, t);
@@ -947,7 +1156,8 @@ impl PlexiApp {
     fn sheets_for(&mut self, t: Target) -> Vec<plexi_core::Rect> {
         let Target::Page(i) = t else { return Vec::new() };
         let i = i.min(self.doc.pages.len() - 1);
-        if !self.config.sheet_guides || self.doc.pages[i].size.dims().is_some() {
+        let shown = self.config.sheet_guides || self.config.sheet_numbers;
+        if !shown || self.doc.pages[i].size.dims().is_some() {
             return Vec::new();
         }
         let size = self.config.sheet_size();
@@ -993,6 +1203,28 @@ impl PlexiApp {
             }
             _ => {}
         }
+        if let Some(c) = self.crop.as_ref().filter(|c| c.target == t) {
+            let asset = self.page_ref(t).elements.iter().find_map(|e| match e {
+                Element::Image(i) if i.id == c.id => Some(i.asset.clone()),
+                _ => None,
+            });
+            let full = view.rect_to_screen(origin, c.full);
+            let shown = view.rect_to_screen(origin, c.shown);
+            if let Some(tex) = asset.and_then(|a| self.textures.get(&a)) {
+                let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                painter.image(tex.id(), full, whole, Color32::from_white_alpha(110));
+                let uv = |q: Pos2| pos2((q.x - full.left()) / full.width(), (q.y - full.top()) / full.height());
+                painter.image(tex.id(), shown, Rect::from_min_max(uv(shown.min), uv(shown.max)), Color32::WHITE);
+            }
+            painter.rect_stroke(full, 0.0, EStroke::new(1.0, accent.gamma_multiply(0.5)), StrokeKind::Outside);
+            painter.rect_stroke(shown, 0.0, EStroke::new(1.5, accent), StrokeKind::Outside);
+            for e in CROP_EDGES {
+                let size = if e[0] != 0 && e[1] != 0 { vec2(10.0, 10.0) } else { vec2(8.0, 8.0) };
+                let h = Rect::from_center_size(edge_point(shown, e), size);
+                painter.rect_filled(h, 2.0, Color32::WHITE);
+                painter.rect_stroke(h, 2.0, EStroke::new(1.5, accent), StrokeKind::Inside);
+            }
+        }
         if let Some(b) = self.selection_bounds(t) {
             let d = match &self.interaction {
                 Interaction::Move { delta, .. } => *delta,
@@ -1034,15 +1266,17 @@ impl PlexiApp {
         let view = self.view_for(t);
         let origin = ui.max_rect().min;
         let pos = view.to_screen(origin, tb.pos);
-        let font = text_font(&tb, view.zoom);
+        let format = text_format(&mut self.fonts, ui.ctx(), &tb, view.zoom);
+        let (_, shift) = text_layout(ui, &mut self.fonts, &tb, "", view.zoom);
         let color = color32(tb.color);
         let measure = if self.text_buf.is_empty() { "Type…".to_owned() } else { format!("{}W", self.text_buf) };
-        let width = ui.painter().layout_no_wrap(measure, font.clone(), color).size().x + 4.0;
+        let width = layout(ui, &measure, &format).size().x + 4.0;
         let ctx = ui.ctx().clone();
-        let mut lost = false;
-        egui::Area::new(Id::unique(("plexi-text", id))).fixed_pos(pos).order(Order::Foreground).show(&ctx, |ui| {
+        let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| layout(ui, buf.as_str(), &format);
+        let area = egui::Area::new(Id::unique(("plexi-text", id))).fixed_pos(pos + shift).order(Order::Foreground);
+        area.show(&ctx, |ui| {
             let edit = TextEdit::multiline(&mut self.text_buf)
-                .font(font)
+                .layouter(&mut layouter)
                 .text_color(color)
                 .frame(egui::Frame::NONE)
                 .margin(Margin::ZERO)
@@ -1050,11 +1284,13 @@ impl PlexiApp {
                 .desired_width(width)
                 .hint_text("Type…");
             let r = ui.add(edit);
-            if self.text_focus_pending {
+            // Keep typing into the box after a click on the toolbar (to change the font,
+            // say). Pressing on the canvas or Esc ends the edit; another text field
+            // (the font search) may take the keyboard meanwhile.
+            let elsewhere = ui.ctx().memory(|m| m.focused().is_some_and(|f| f != r.id));
+            if self.text_focus_pending || (!r.has_focus() && !elsewhere) {
                 r.request_focus();
                 self.text_focus_pending = false;
-            } else if r.lost_focus() {
-                lost = true;
             }
             // A thin caret-colored guide so the box is findable on busy screens.
             let g = r.rect.expand(3.0);
@@ -1065,9 +1301,6 @@ impl PlexiApp {
                 StrokeKind::Outside,
             );
         });
-        if lost {
-            self.finish_text_edit();
-        }
     }
 }
 
