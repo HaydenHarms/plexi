@@ -68,7 +68,9 @@ pub enum Interaction {
         last: [f32; 2],
         changed: bool,
     },
-    Lasso(Vec<[f32; 2]>),
+    /// `true` when Shift was held as the lasso started: its hits are added to the
+    /// selection on release instead of replacing it.
+    Lasso(Vec<[f32; 2]>, bool),
     Move {
         start: [f32; 2],
         delta: [f32; 2],
@@ -94,6 +96,15 @@ pub enum Interaction {
         anchor: [f32; 2],
         dir: [f32; 2],
         orig: [f32; 2],
+        changed: bool,
+    },
+    /// Dragging a corner of the selected text box to change its wrap width. `anchor_x`
+    /// is the x of the opposite edge (which stays put), `dir_x` is +1 when the dragged
+    /// corner is on the right, -1 on the left.
+    TextResize {
+        id: u64,
+        anchor_x: f32,
+        dir_x: f32,
         changed: bool,
     },
 }
@@ -288,8 +299,14 @@ fn text_format(fonts: &mut FontBook, ctx: &egui::Context, t: &TextBox, zoom: f32
     }
 }
 
-fn layout(ui: &Ui, text: &str, format: &TextFormat) -> Arc<Galley> {
-    let job = LayoutJob::single_section(text.to_owned(), format.clone());
+/// `wrap_width` (screen px) is the live, pixel-accurate wrap while typing or just
+/// displaying; it is `egui`'s own wrapping, so it can land a word differently than the
+/// estimate [`TextBox::wrap_line`] uses for export, but the box width always matches.
+fn layout(ui: &Ui, text: &str, format: &TextFormat, wrap_width: Option<f32>) -> Arc<Galley> {
+    let mut job = LayoutJob::single_section(text.to_owned(), format.clone());
+    if let Some(w) = wrap_width {
+        job.wrap = egui::text::TextWrapping::wrap_at_width(w);
+    }
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
@@ -298,10 +315,10 @@ fn layout(ui: &Ui, text: &str, format: &TextFormat) -> Arc<Galley> {
 /// baseline at `BASELINE`, exactly where the exporters put them, whatever the font.
 pub fn text_layout(ui: &Ui, fonts: &mut FontBook, t: &TextBox, text: &str, zoom: f32) -> (Arc<Galley>, Vec2) {
     let format = text_format(fonts, ui.ctx(), t, zoom);
-    let probe = layout(ui, "H", &format);
+    let probe = layout(ui, "H", &format, None);
     let baseline = probe.rows.first().and_then(|r| r.row.glyphs.first().map(|g| r.pos.y + g.pos.y));
     let shift = t.size * BASELINE * zoom - baseline.unwrap_or(t.size * BASELINE * zoom);
-    (layout(ui, text, &format), vec2(0.0, shift))
+    (layout(ui, text, &format, t.wrap.map(|w| w * zoom)), vec2(0.0, shift))
 }
 
 pub fn paint_page(
@@ -559,6 +576,17 @@ impl PlexiApp {
         })
     }
 
+    /// The single selected text box, if that is what is selected.
+    pub fn selected_text(&self, t: Target) -> Option<TextBox> {
+        if self.selection.len() != 1 {
+            return None;
+        }
+        self.page_ref(t).elements.iter().find_map(|e| match e {
+            Element::Text(tb) if self.selection.contains(&tb.id) => Some(tb.clone()),
+            _ => None,
+        })
+    }
+
     /// The resize handle of the selected image under screen point `pos`.
     fn handle_at(&self, t: Target, view: View, origin: Pos2, pos: Pos2) -> Option<Handle> {
         let img = self.selected_image(t)?;
@@ -573,6 +601,19 @@ impl PlexiApp {
         .into_iter()
         .find(|(corner, _, _)| view.to_screen(origin, *corner).distance(pos) <= HANDLE_REACH)
         .map(|(_, anchor, dir)| (img.id, anchor, dir, img.size))
+    }
+
+    /// The wrap-width handle of the selected text box under screen point `pos`: one of
+    /// its four corners, left side or right. There is no height field to drag, so only
+    /// the x side of the corner matters.
+    fn text_handle_at(&self, t: Target, view: View, origin: Pos2, pos: Pos2) -> Option<(u64, f32, f32)> {
+        let tb = self.selected_text(t)?;
+        let b = tb.approx_bounds();
+        let (x0, x1) = (b.min[0], b.max[0]);
+        [[x0, b.min[1]], [x1, b.min[1]], [x1, b.max[1]], [x0, b.max[1]]]
+            .into_iter()
+            .find(|corner| view.to_screen(origin, *corner).distance(pos) <= HANDLE_REACH)
+            .map(|corner| if corner[0] == x0 { (tb.id, x1, -1.0) } else { (tb.id, x0, 1.0) })
     }
 
     // ----- cropping ------------------------------------------------------------------
@@ -713,7 +754,17 @@ impl PlexiApp {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn begin(&mut self, t: Target, view: View, origin: Pos2, pos: Pos2, button: PointerButton, space: bool, now: f64) {
+    fn begin(
+        &mut self,
+        t: Target,
+        view: View,
+        origin: Pos2,
+        pos: Pos2,
+        button: PointerButton,
+        space: bool,
+        now: f64,
+        shift: bool,
+    ) {
         if self.editing_text.is_some() {
             self.finish_text_edit();
             if self.tool == Tool::Text {
@@ -776,6 +827,27 @@ impl PlexiApp {
                     self.interaction = Interaction::Resize { id, anchor, dir, orig, changed: false };
                     return;
                 }
+                if let Some((id, anchor_x, dir_x)) = self.text_handle_at(t, view, origin, pos) {
+                    self.pending_snapshot = Some(self.snapshot_of(t));
+                    self.interaction = Interaction::TextResize { id, anchor_x, dir_x, changed: false };
+                    return;
+                }
+                if shift {
+                    // Shift+click adds an unselected element to the selection, or
+                    // removes one that's already in it — it never just replaces the
+                    // selection, so it skips the "drag what's already selected" shortcut
+                    // below even when pressed inside the current selection's bounds.
+                    match self.hit_element(t, p, 4.0 / view.zoom, false) {
+                        Some(id) if self.selection.remove(&id) => self.interaction = Interaction::Idle,
+                        Some(id) => {
+                            self.selection.insert(id);
+                            self.interaction = Interaction::Move { start: p, delta: [0.0, 0.0] };
+                        }
+                        // Empty space: a lasso that adds its catch to the selection.
+                        None => self.interaction = Interaction::Lasso(vec![p], true),
+                    }
+                    return;
+                }
                 let inside = self.selection_bounds(t).is_some_and(|b| b.expand(6.0 / view.zoom).contains(p));
                 if inside {
                     self.interaction = Interaction::Move { start: p, delta: [0.0, 0.0] };
@@ -785,7 +857,7 @@ impl PlexiApp {
                     self.interaction = Interaction::Move { start: p, delta: [0.0, 0.0] };
                 } else {
                     self.selection.clear();
-                    self.interaction = Interaction::Lasso(vec![p]);
+                    self.interaction = Interaction::Lasso(vec![p], false);
                 }
             }
             // Text boxes open on release: egui drops keyboard focus on the click that
@@ -846,12 +918,12 @@ impl PlexiApp {
                 let min = 8.0 / view.zoom;
                 let w = ((p[0] - anchor[0]) * dir[0]).max(min);
                 let h = ((p[1] - anchor[1]) * dir[1]).max(min);
-                // Keep the picture's proportions unless Shift is held.
+                // Resize freely; Shift keeps the picture's original proportions.
                 let (w, h) = if shift {
-                    (w, h)
-                } else {
                     let s = (w / orig[0].max(1e-3)).max(h / orig[1].max(1e-3));
                     (orig[0] * s, orig[1] * s)
+                } else {
+                    (w, h)
                 };
                 let pos = [
                     if dir[0] > 0.0 { anchor[0] } else { anchor[0] - w },
@@ -864,7 +936,20 @@ impl PlexiApp {
                     *changed = true;
                 }
             }
-            Interaction::Lasso(pts) => {
+            Interaction::TextResize { id, anchor_x, dir_x, changed } => {
+                let tb = self.selected_text(t);
+                let min = tb.as_ref().map_or(8.0, |tb| tb.min_wrap()).max(8.0 / view.zoom);
+                let w = ((p[0] - *anchor_x) * *dir_x).max(min);
+                let id = *id;
+                if let Some(Element::Text(tb)) = self.page_mut(t).elements.iter_mut().find(|e| e.id() == id) {
+                    if *dir_x < 0.0 {
+                        tb.pos[0] = *anchor_x - w;
+                    }
+                    tb.wrap = Some(w);
+                    *changed = true;
+                }
+            }
+            Interaction::Lasso(pts, _) => {
                 if pts.last().is_none_or(|l| dist(*l, p) > 2.0 / view.zoom) {
                     pts.push(p);
                 }
@@ -880,6 +965,22 @@ impl PlexiApp {
         self.interaction = inter;
     }
 
+    /// Shared by [`Interaction::Resize`] and [`Interaction::TextResize`]: commit the
+    /// drag to history if it actually changed anything, and leave the element selected
+    /// under its fresh id.
+    fn finish_resize(&mut self, t: Target, id: u64, changed: bool) {
+        let snapshot = self.pending_snapshot.take();
+        if changed && let Some(s) = snapshot {
+            self.history.push(s);
+            self.touch();
+            let page = self.page_mut(t);
+            if let Some(i) = page.find(id) {
+                page.elements[i].renew_id();
+                self.selection = [page.elements[i].id()].into();
+            }
+        }
+    }
+
     fn end(&mut self, t: Target, view: View, shift: bool) {
         if let Some(c) = &mut self.crop {
             c.drag = None;
@@ -888,18 +989,8 @@ impl PlexiApp {
             Interaction::Idle | Interaction::Pan { .. } => {}
             Interaction::TextAt(p) => self.open_text_at(t, p),
             Interaction::RightPress { start } => self.open_context_menu(t, view, self.canvas_origin, start),
-            Interaction::Resize { id, changed, .. } => {
-                let snapshot = self.pending_snapshot.take();
-                if changed && let Some(s) = snapshot {
-                    self.history.push(s);
-                    self.touch();
-                    let page = self.page_mut(t);
-                    if let Some(i) = page.find(id) {
-                        page.elements[i].renew_id();
-                        self.selection = [page.elements[i].id()].into();
-                    }
-                }
-            }
+            Interaction::Resize { id, changed, .. } => self.finish_resize(t, id, changed),
+            Interaction::TextResize { id, changed, .. } => self.finish_resize(t, id, changed),
             Interaction::Ink(b) => {
                 let s = b.finish();
                 if !s.points.is_empty() {
@@ -915,7 +1006,7 @@ impl PlexiApp {
                     self.touch();
                 }
             }
-            Interaction::Lasso(pts) => {
+            Interaction::Lasso(pts, extend) => {
                 if pts.len() < 3 {
                     // A click on empty space, or on a locked image.
                     if let Some(p) = pts.first()
@@ -925,7 +1016,7 @@ impl PlexiApp {
                     }
                     return;
                 }
-                let sel: HashSet<u64> = self
+                let mut sel: HashSet<u64> = self
                     .page_ref(t)
                     .elements
                     .iter()
@@ -939,6 +1030,11 @@ impl PlexiApp {
                     })
                     .map(Element::id)
                     .collect();
+                // Shift started this lasso: add its catch to the selection instead of
+                // replacing it.
+                if extend {
+                    sel.extend(self.selection.iter().copied());
+                }
                 self.selection = sel;
             }
             Interaction::Move { delta, .. } => {
@@ -1003,7 +1099,7 @@ impl PlexiApp {
                             self.context_menu = None;
                         }
                     } else if matches!(self.interaction, Interaction::Idle) && on_canvas(pos) {
-                        self.begin(t, view, origin, pos, button, space, now);
+                        self.begin(t, view, origin, pos, button, space, now, mods.shift);
                     }
                 }
                 Event::PointerMoved(pos) => {
@@ -1076,8 +1172,12 @@ impl PlexiApp {
                     Interaction::Resize { dir, .. } => Some(*dir),
                     _ => self.handle_at(t, view, rect.min, pos).map(|h| h.2),
                 };
+                let text_handle = matches!(self.interaction, Interaction::TextResize { .. })
+                    || self.text_handle_at(t, view, rect.min, pos).is_some();
                 let icon = if let Some(d) = handle {
                     if d[0] * d[1] > 0.0 { CursorIcon::ResizeNwSe } else { CursorIcon::ResizeNeSw }
+                } else if text_handle {
+                    CursorIcon::ResizeHorizontal
                 } else if self.selection_bounds(t).is_some_and(|b| b.expand(6.0 / view.zoom).contains(p))
                     || self.hit_element(t, p, 4.0 / view.zoom, false).is_some()
                 {
@@ -1195,7 +1295,7 @@ impl PlexiApp {
                 };
                 paint_shape(&painter, &s, view, origin, [0.0, 0.0]);
             }
-            Interaction::Lasso(pts) if pts.len() > 1 => {
+            Interaction::Lasso(pts, _) if pts.len() > 1 => {
                 let screen: Vec<Pos2> = pts.iter().map(|p| view.to_screen(origin, *p)).collect();
                 let mut closed = screen.clone();
                 closed.push(screen[0]);
@@ -1252,6 +1352,25 @@ impl PlexiApp {
                 painter.rect_stroke(h, 2.0, EStroke::new(1.5, accent), StrokeKind::Inside);
             }
         }
+        // Corner handles for dragging a selected text box's wrap width. Only their x
+        // side matters (there is no height field), but they sit at the corners like an
+        // image's so the two tools feel the same.
+        if let Some(tb) = self.selected_text(t) {
+            let d = match &self.interaction {
+                Interaction::Move { delta, .. } => *delta,
+                _ => [0.0, 0.0],
+            };
+            let b = tb.approx_bounds();
+            let r = view.rect_to_screen(
+                origin,
+                plexi_core::Rect::from_min_size([b.min[0] + d[0], b.min[1] + d[1]], [b.width(), b.height()]),
+            );
+            for c in [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()] {
+                let h = Rect::from_center_size(c, vec2(9.0, 9.0));
+                painter.rect_filled(h, 2.0, Color32::WHITE);
+                painter.rect_stroke(h, 2.0, EStroke::new(1.5, accent), StrokeKind::Inside);
+            }
+        }
     }
 
     fn text_editor(&mut self, ui: &Ui, t: Target) {
@@ -1269,10 +1388,13 @@ impl PlexiApp {
         let format = text_format(&mut self.fonts, ui.ctx(), &tb, view.zoom);
         let (_, shift) = text_layout(ui, &mut self.fonts, &tb, "", view.zoom);
         let color = color32(tb.color);
+        let wrap_width = tb.wrap.map(|w| w * view.zoom);
         let measure = if self.text_buf.is_empty() { "Type…".to_owned() } else { format!("{}W", self.text_buf) };
-        let width = layout(ui, &measure, &format).size().x + 4.0;
+        // A wrapped box keeps its own width instead of growing to fit what's typed.
+        let width = wrap_width.unwrap_or_else(|| layout(ui, &measure, &format, None).size().x + 4.0);
         let ctx = ui.ctx().clone();
-        let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| layout(ui, buf.as_str(), &format);
+        let mut layouter =
+            move |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| layout(ui, buf.as_str(), &format, wrap_width);
         let area = egui::Area::new(Id::unique(("plexi-text", id))).fixed_pos(pos + shift).order(Order::Foreground);
         area.show(&ctx, |ui| {
             let edit = TextEdit::multiline(&mut self.text_buf)

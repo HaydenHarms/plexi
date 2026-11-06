@@ -186,6 +186,10 @@ pub struct TextBox {
     pub italic: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub underline: bool,
+    /// Width in page units the text wraps to, set by dragging a corner handle.
+    /// `None` is the old behavior: one line per `\n`, sized to the longest of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<f32>,
 }
 
 /// The font text boxes use unless another is picked. It is bundled, so it looks the same
@@ -205,6 +209,7 @@ impl TextBox {
             bold: false,
             italic: false,
             underline: false,
+            wrap: None,
         }
     }
 
@@ -217,14 +222,70 @@ impl TextBox {
         self.size * LINE_HEIGHT
     }
 
+    /// Average glyph advance as a fraction of the font size, used to estimate wrapping
+    /// and bounds without a real font (exact widths depend on the font the renderer has).
+    fn advance(&self) -> f32 {
+        if self.bold { 0.6 } else { 0.55 }
+    }
+
+    /// The narrowest a dragged wrap width is allowed to shrink to: room for a couple
+    /// of characters, so a box can never be squeezed down to nothing.
+    pub fn min_wrap(&self) -> f32 {
+        self.size * self.advance() * 2.0
+    }
+
+    /// Word-wrap one `\n`-separated line to [`Self::wrap`], estimating glyph width the
+    /// same way [`Self::approx_bounds`] does. Shared by the editor's layout and every
+    /// exporter (SVG has no native text wrapping) so a box wraps the same everywhere.
+    /// Breaks on whitespace where it can; a single word wider than the wrap width is
+    /// hard-broken at a character boundary instead, so no visual line ever overflows.
+    pub fn wrap_line<'a>(&self, line: &'a str) -> Vec<&'a str> {
+        let Some(w) = self.wrap else { return vec![line] };
+        let max_chars = ((w / (self.size * self.advance()).max(1.0)).floor() as usize).max(1);
+        if line.chars().count() <= max_chars {
+            return vec![line];
+        }
+        let mut out = Vec::new();
+        let mut start = 0usize; // byte offset where the current visual line begins
+        let mut col = 0usize; // characters placed on it so far
+        let mut last_space = None; // byte offset right after the most recent space on it
+        for (i, c) in line.char_indices() {
+            if col == max_chars {
+                // This line is full before `c` joins it: break after the last space on
+                // it, or hard-break right before `c` if there was none (one very long
+                // word, broken by character instead of overflowing).
+                let cut = last_space.filter(|&b| b > start).unwrap_or(i);
+                out.push(line[start..cut].trim());
+                start = cut;
+                col = line[start..i].chars().count();
+                last_space = None;
+            }
+            if c.is_whitespace() {
+                last_space = Some(i + c.len_utf8());
+            }
+            col += 1;
+        }
+        out.push(line[start..].trim());
+        out
+    }
+
+    /// Every visual line of the box: each `\n`-separated line, word-wrapped.
+    pub fn wrapped_lines(&self) -> Vec<&str> {
+        self.text.split('\n').flat_map(|l| self.wrap_line(l)).collect()
+    }
+
     /// A rough extent. Exact glyph widths depend on the font the renderer has, so this
     /// uses an average advance; it is only used for hit testing and export bounds.
     pub fn approx_bounds(&self) -> Rect {
-        let lines: Vec<&str> = self.text.split('\n').collect();
-        let widest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0).max(1);
-        let advance = if self.bold { 0.6 } else { 0.55 };
-        let w = widest as f32 * self.size * advance;
+        let lines = self.wrapped_lines();
         let h = lines.len().max(1) as f32 * self.line_height();
+        let w = match self.wrap {
+            Some(w) => w,
+            None => {
+                let widest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0).max(1);
+                widest as f32 * self.size * self.advance()
+            }
+        };
         Rect::from_min_size(self.pos, [w, h])
     }
 }
@@ -628,6 +689,39 @@ mod tests {
             Element::Stroke(b) => assert_eq!(b.points.len(), 2),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn wrapping_breaks_on_spaces_and_bounds_follow_it() {
+        let mut t = TextBox::new([10.0, 20.0], "one two three four", 20.0, Color::BLACK);
+        // Unwrapped: a single line, as wide as the whole text.
+        assert_eq!(t.wrapped_lines(), vec!["one two three four"]);
+        let natural = t.approx_bounds();
+        assert_eq!(natural.height(), t.line_height());
+
+        // Narrow it to a few words per line.
+        t.wrap = Some(60.0);
+        let lines = t.wrapped_lines();
+        assert!(lines.len() > 1, "{lines:?}");
+        assert!(lines.iter().all(|l| !l.is_empty() && !l.starts_with(' ') && !l.ends_with(' ')), "{lines:?}");
+        assert_eq!(lines.join(" "), "one two three four", "wrapping only inserts breaks, never drops words");
+        let wrapped = t.approx_bounds();
+        assert_eq!(wrapped.width(), 60.0, "the box keeps the wrap width even if the text doesn't fill it");
+        assert!(wrapped.height() > natural.height(), "more lines take more height");
+
+        // A word with no spaces to break on is hard-broken by character instead of
+        // overflowing the box.
+        t.text = "a-very-long-unbreakable-word".into();
+        let lines = t.wrap_line(&t.text);
+        let max_chars = (t.wrap.unwrap() / (t.size * t.advance())).floor() as usize;
+        assert!(lines.len() > 1, "{lines:?}");
+        assert!(lines.iter().all(|l| l.chars().count() <= max_chars), "{lines:?}");
+        assert_eq!(lines.concat(), t.text, "hard-breaking never drops characters");
+
+        // `\n` splits still apply before wrapping each piece.
+        t.wrap = None;
+        t.text = "short\nline".into();
+        assert_eq!(t.wrapped_lines(), vec!["short", "line"]);
     }
 
     #[test]

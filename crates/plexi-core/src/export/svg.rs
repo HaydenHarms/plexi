@@ -183,7 +183,10 @@ pub(crate) fn element_svg(out: &mut String, el: &Element, assets: &Assets, opts:
                 t.color.hex_rgb(),
                 opacity_attr("fill-opacity", t.color),
             );
-            for (i, line) in t.text.split('\n').enumerate() {
+            // SVG text has no native wrapping, so a wrapped box's lines (word-wrapped the
+            // same way the editor estimates them, [`TextBox::wrapped_lines`]) become one
+            // `tspan` each, just like its explicit `\n` lines always have.
+            for (i, line) in t.wrapped_lines().into_iter().enumerate() {
                 let y = t.pos[1] + t.size * BASELINE + i as f32 * t.line_height();
                 let _ = write!(out, "<tspan x=\"{}\" y=\"{}\">{}</tspan>", n(t.pos[0]), n(y), esc(line));
             }
@@ -397,5 +400,20 @@ mod tests {
         }));
         let svg = page_svg(&page, &Assets::new(), &RenderOptions::default());
         assert!(crate::export::parse_svg(&svg).is_ok());
+    }
+
+    #[test]
+    fn a_wrapped_text_box_gets_one_tspan_per_wrapped_line() {
+        let mut t = TextBox::new([10.0, 10.0], "one two three four", 20.0, Color::BLACK);
+        t.wrap = Some(60.0);
+        let lines: Vec<String> = t.wrapped_lines().into_iter().map(str::to_owned).collect();
+        assert!(lines.len() > 1, "{lines:?}");
+        let mut out = String::new();
+        element_svg(&mut out, &Element::Text(t), &Assets::new(), &RenderOptions::default());
+        assert_eq!(out.matches("<tspan").count(), lines.len(), "{out}");
+        for line in lines {
+            assert!(out.contains(&format!(">{line}</tspan>")), "missing {line:?} in {out}");
+        }
+        assert!(crate::export::parse_svg(&format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{out}</svg>")).is_ok());
     }
 }

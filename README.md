@@ -59,12 +59,13 @@ and draw-on-screen covers the main display.
 | Snip an area → page + clipboard | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> (anywhere), or the scissors button |
 | Screenshot with ink → clipboard | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> while drawing on screen |
 | Pen, highlighter, eraser | <kbd>P</kbd> <kbd>H</kbd> <kbd>E</kbd>, or middle-drag / pen barrel button to erase |
-| Select (lasso), text | <kbd>S</kbd> <kbd>T</kbd>; double-click text to edit it; font, size and style in the bar under the toolbar |
+| Select (lasso), text | <kbd>S</kbd> <kbd>T</kbd>; double-click text to edit it; font, size and style in the bar under the toolbar; <kbd>Shift</kbd>+click adds or removes one element from the selection |
 | Line, arrow, rectangle, ellipse | <kbd>L</kbd> <kbd>A</kbd> <kbd>R</kbd> <kbd>O</kbd> (hold <kbd>Shift</kbd> to snap) |
 | Colors, width | <kbd>1</kbd>–<kbd>9</kbd>, <kbd>[</kbd> <kbd>]</kbd> |
 | Pan, zoom | right-drag, <kbd>Space</kbd>+drag, <kbd>Shift</kbd>+scroll, two fingers · scroll wheel, pinch |
 | Pages | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> new, <kbd>PgDn</kbd> / <kbd>PgUp</kbd>, trash button to delete (undoable) |
-| Images | paste or drop; drag a corner to resize (<kbd>Shift</kbd>: free) |
+| Images | paste or drop; drag a corner to resize freely (<kbd>Shift</kbd>: keep proportions) |
+| Text boxes | drag a corner handle to set a wrap width |
 | Crop or lock an image, arrange, paper color, sheet outlines and numbers | right-click |
 | Print | <kbd>Ctrl</kbd>+<kbd>P</kbd> (pick sheets, then **Print…** opens the PDF to print) |
 | Everything else | <kbd>Ctrl</kbd>+<kbd>K</kbd> command palette, <kbd>F1</kbd> shortcuts |

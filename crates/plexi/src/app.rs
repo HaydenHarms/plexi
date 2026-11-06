@@ -2036,6 +2036,15 @@ mod tests {
             self.drag(PointerButton::Primary, &[(x, y)]);
         }
 
+        /// Hold (or release) Shift for every step from here on, the way a real press
+        /// would, until this is called again. `egui`'s modifiers persist across frames
+        /// until an `Event::ModifiersChanged`, so one of these before a `drag`/`click`
+        /// is enough to simulate the key being held throughout it.
+        fn set_shift(&mut self, held: bool) {
+            let m = if held { Modifiers::SHIFT } else { Modifiers::NONE };
+            self.step(vec![Event::ModifiersChanged(m)]);
+        }
+
         fn elements(&self) -> &[Element] {
             &self.app.doc.pages[self.app.page].elements
         }
@@ -2101,6 +2110,97 @@ mod tests {
         assert_eq!(h.app.selection.len(), 1, "selection follows the moved element");
         h.app.delete_selection();
         assert!(h.elements().is_empty());
+    }
+
+    #[test]
+    fn shift_click_extends_and_toggles_the_selection() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.insert_image(png(40, 40), Some([150.0, 150.0]), &ctx);
+        h.step(vec![]);
+        h.app.insert_image(png(40, 40), Some([450.0, 150.0]), &ctx);
+        h.step(vec![]);
+        let (pos_a, pos_b, id_a, id_b) = {
+            let imgs: Vec<&ImageEl> = h
+                .elements()
+                .iter()
+                .filter_map(|e| match e {
+                    Element::Image(i) => Some(i),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(imgs.len(), 2);
+            (imgs[0].pos, imgs[1].pos, imgs[0].id, imgs[1].id)
+        };
+
+        h.app.tool = Tool::Lasso;
+        let view = h.app.view;
+        let origin = h.app.canvas_origin;
+        let a = view.to_screen(origin, [pos_a[0] + 5.0, pos_a[1] + 5.0]);
+        let b = view.to_screen(origin, [pos_b[0] + 5.0, pos_b[1] + 5.0]);
+
+        h.click(a.x, a.y);
+        assert_eq!(h.app.selection, HashSet::from([id_a]), "a plain click replaces the selection");
+
+        h.set_shift(true);
+        h.click(b.x, b.y);
+        h.set_shift(false);
+        assert_eq!(h.app.selection, HashSet::from([id_a, id_b]), "shift+click adds the second image to it");
+
+        h.set_shift(true);
+        h.click(b.x, b.y);
+        h.set_shift(false);
+        assert_eq!(
+            h.app.selection,
+            HashSet::from([id_a]),
+            "shift+click on an already-selected image removes it instead"
+        );
+
+        h.set_shift(true);
+        h.click(b.x, b.y);
+        h.set_shift(false);
+        assert_eq!(h.app.selection.len(), 2, "both are selected again");
+
+        // Dragging from inside the combined bounds moves both images together.
+        h.drag(PointerButton::Primary, &[(a.x, a.y), (a.x + 40.0, a.y + 20.0), (a.x + 80.0, a.y + 40.0)]);
+        let moved: Vec<[f32; 2]> = h
+            .elements()
+            .iter()
+            .filter_map(|e| match e {
+                Element::Image(i) => Some(i.pos),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            moved[0][0] > pos_a[0] + 10.0 && moved[1][0] > pos_b[0] + 10.0,
+            "both images moved: {pos_a:?}/{pos_b:?} -> {moved:?}"
+        );
+        assert_eq!(h.app.selection.len(), 2, "the moved pair stays selected");
+    }
+
+    #[test]
+    fn shift_dragging_the_lasso_adds_to_the_selection_too() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 500.0));
+        assert_eq!(h.elements().len(), 2);
+        h.app.tool = Tool::Lasso;
+        // Lasso around only the first stroke.
+        h.drag(
+            PointerButton::Primary,
+            &[(250.0, 250.0), (550.0, 250.0), (550.0, 350.0), (250.0, 350.0), (250.0, 260.0)],
+        );
+        assert_eq!(h.app.selection.len(), 1);
+        let first = *h.app.selection.iter().next().unwrap();
+        // A plain second lasso elsewhere would replace the selection; a Shift one adds.
+        h.set_shift(true);
+        h.drag(
+            PointerButton::Primary,
+            &[(250.0, 450.0), (550.0, 450.0), (550.0, 550.0), (250.0, 550.0), (250.0, 460.0)],
+        );
+        h.set_shift(false);
+        assert_eq!(h.app.selection.len(), 2, "the second lasso's catch joins the first");
+        assert!(h.app.selection.contains(&first), "the first stroke is still selected");
     }
 
     #[test]
@@ -2186,15 +2286,31 @@ mod tests {
         assert_eq!(img.size, [100.0, 50.0]);
         let view = h.app.view;
         let corner = view.to_screen(h.app.canvas_origin, [img.pos[0] + 100.0, img.pos[1] + 50.0]);
-        // Drag the bottom-right handle 100 points right: proportions are kept.
+        // Drag the bottom-right handle 100 points right: it resizes freely, so only the
+        // width grows.
         h.drag(
             PointerButton::Primary,
             &[(corner.x, corner.y), (corner.x + 50.0, corner.y), (corner.x + 100.0, corner.y)],
         );
+        let wide = image_el(&h);
+        assert!((wide.size[0] - 200.0).abs() < 1.0 && (wide.size[1] - 50.0).abs() < 1.0, "{:?}", wide.size);
+        assert_eq!(wide.pos, img.pos, "the opposite corner stays put");
+        assert!(h.app.selection.contains(&wide.id), "the resized image stays selected");
+        h.app.undo();
+        assert_eq!(image_el(&h).size, [100.0, 50.0]);
+
+        // The same drag with Shift held keeps the original proportions instead.
+        // (Undo clears the selection, so the handle needs picking up again first.)
+        h.app.selection = [image_el(&h).id].into();
+        h.set_shift(true);
+        h.drag(
+            PointerButton::Primary,
+            &[(corner.x, corner.y), (corner.x + 50.0, corner.y), (corner.x + 100.0, corner.y)],
+        );
+        h.set_shift(false);
         let big = image_el(&h);
         assert!((big.size[0] - 200.0).abs() < 1.0 && (big.size[1] - 100.0).abs() < 1.0, "{:?}", big.size);
         assert_eq!(big.pos, img.pos, "the opposite corner stays put");
-        assert!(h.app.selection.contains(&big.id), "the resized image stays selected");
         h.app.undo();
         assert_eq!(image_el(&h).size, [100.0, 50.0]);
 
@@ -2298,6 +2414,48 @@ mod tests {
         assert_eq!(h.app.selection.len(), 1, "the restyled box stays selected");
         h.app.undo();
         assert!(matches!(h.elements().first(), Some(Element::Text(t)) if !t.bold));
+    }
+
+    #[test]
+    fn drag_resizing_a_text_box_sets_its_wrap_width() {
+        let mut h = Harness::new();
+        h.app.tool = Tool::Text;
+        h.click(300.0, 300.0);
+        h.step(vec![Event::Text("hello wide world".into())]);
+        h.click(700.0, 650.0); // click elsewhere: commits the box
+        h.step(vec![]);
+        let Some(Element::Text(t)) = h.elements().first().cloned() else { panic!("a text box") };
+        assert_eq!(t.wrap, None, "unwrapped until dragged");
+        let bounds = t.approx_bounds();
+
+        h.app.tool = Tool::Lasso;
+        let view = h.app.view;
+        let origin = h.app.canvas_origin;
+        let at = view.to_screen(origin, [t.pos[0] + 10.0, t.pos[1] + 10.0]);
+        h.click(at.x, at.y);
+        assert_eq!(h.app.selection, HashSet::from([t.id]), "clicking the text selects it");
+
+        // Drag the top-right handle left, shrinking the box to ~60 page units wide.
+        let corner = view.to_screen(origin, [bounds.max[0], bounds.min[1]]);
+        let target = view.to_screen(origin, [bounds.min[0] + 60.0, bounds.min[1]]);
+        let mid = corner + (target - corner) / 2.0;
+        h.drag(PointerButton::Primary, &[(corner.x, corner.y), (mid.x, mid.y), (target.x, target.y)]);
+
+        let Some(Element::Text(resized)) = h.elements().first().cloned() else { panic!("a text box") };
+        assert!(resized.wrap.is_some_and(|w| (w - 60.0).abs() < 2.0), "{:?}", resized.wrap);
+        assert_eq!(resized.pos, t.pos, "dragging the right edge keeps the left edge in place");
+        assert!(resized.wrapped_lines().len() > 1, "narrower than the text: it wraps to more lines");
+        assert!(h.app.selection.contains(&resized.id), "the resized box stays selected");
+
+        h.app.undo();
+        assert_eq!(
+            h.elements().first().and_then(|e| match e {
+                Element::Text(t) => t.wrap,
+                _ => None,
+            }),
+            None,
+            "undo removes the wrap width again"
+        );
     }
 
     #[test]
