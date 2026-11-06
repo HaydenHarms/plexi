@@ -2,7 +2,7 @@
 <!--
   WiX (v5) package for Plexi: an all-users MSI for managed machines.
   Built by .github/workflows/release.yml:
-    wix build installer/plexi.wxs -arch x64 -d Version=0.2.0 -d SourceExe=target/release/plexi.exe -o dist/Plexi-0.2.0-x64.msi
+    wix build installer/plexi.wxs -arch x64 -d Version=0.3.0 -d SourceExe=target/release/plexi.exe -o dist/Plexi-0.3.0-x64.msi
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="Plexi" Manufacturer="Hayden Harms" Version="$(var.Version)"

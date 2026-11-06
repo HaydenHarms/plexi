@@ -1,6 +1,6 @@
 ; Inno Setup script for the Plexi installer.
 ; Built by .github/workflows/release.yml:
-;   ISCC /DAppVersion=0.2.0 /DSourceExe=<repo>\target\release\plexi.exe /O<repo>\dist installer\plexi.iss
+;   ISCC /DAppVersion=0.3.0 /DSourceExe=<repo>\target\release\plexi.exe /O<repo>\dist installer\plexi.iss
 ; Installs per user by default (no admin prompt); the first page offers an all-users install.
 
 #ifndef AppVersion
