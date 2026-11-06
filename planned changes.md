@@ -1,2 +1,1 @@
-- [x] Fix weird zoom stacking in zoom percent.png
-- [x] background color only effects the paper and not the infinite space around. Please fix or at least have some sort of option for that
+- [ ] Add image cropping to right click menu
