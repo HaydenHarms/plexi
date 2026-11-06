@@ -2,3 +2,4 @@
 - [ ] Add a snipping tool feature
 - [ ] Add selection of pages to print, e.g. 1,3,5
 - [ ] Toggle page number/lining
+- [ ] More text tools. Text boxes don't work well and you can't customize fonts in any way
