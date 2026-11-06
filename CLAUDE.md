@@ -7,7 +7,8 @@ Rust notes/ink app with a transparent draw-on-screen overlay. Windows first.
 - Before committing: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace`. CI runs the same.
 - All Win32 calls live in `crates/plexi/src/platform.rs`.
-- Every visual export goes through `export::svg::page_svg`; keep the editor's rendering and
+- Every visual export goes through `export::svg::frame_svg`, one call per `export::layout::Frame`
+  (output page/file); the export dialog previews the same frames; keep the editor's rendering and
   that SVG in agreement (text metrics are pinned by `canvas::tests::text_metrics_*`).
 - The window is created transparent once; notebook mode paints an opaque background, overlay
   mode paints only ink. Mode switches use viewport commands plus `platform::place_*`.

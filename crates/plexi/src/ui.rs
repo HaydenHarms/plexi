@@ -5,10 +5,13 @@ use egui::{
     Align2, Color32, Context, CornerRadius, Frame, Id, Key, Order, Painter, Pos2, Rect, Response, Sense, Shadow,
     Shape as EShape, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
-use plexi_core::export::ExportFormat;
-use plexi_core::{Background, Color, PageSize, ShapeKind};
+use std::sync::mpsc::Receiver;
 
-use crate::app::{ExportScope, Mode, Overlay, PlexiApp, SnapshotAction, Tool};
+use plexi_core::export::ExportFormat;
+use plexi_core::export::layout::{Area, Frame as OutFrame, PAPERS};
+use plexi_core::{Background, Color, Element, PAPER_COLORS, PageSize, ShapeKind};
+
+use crate::app::{ExportScope, Mode, Overlay, PaperChoice, PlexiApp, SnapshotAction, Tool};
 use crate::canvas::color32;
 use crate::history::Target;
 
@@ -414,6 +417,10 @@ fn page_bar(app: &mut PlexiApp, ctx: &Context) {
                     if icon_button(ui, Icon::Plus, false, "New page (Ctrl+Enter)").clicked() {
                         app.add_page();
                     }
+                    let tip = if app.doc.pages.len() > 1 { "Delete this page" } else { "Clear this page" };
+                    if icon_button(ui, Icon::Trash, false, tip).clicked() {
+                        app.delete_page();
+                    }
                 });
             });
         });
@@ -437,9 +444,11 @@ fn page_menu(app: &mut PlexiApp, ui: &mut Ui) {
             }
         }
     });
+    ui.label("Paper color");
+    paper_colors(app, ui, i);
     ui.label("Size");
     ui.horizontal(|ui| {
-        for (size, label) in [(PageSize::Letter, "Letter"), (PageSize::A4, "A4"), (PageSize::Infinite, "Infinite")] {
+        for (size, label) in [(PageSize::Infinite, "Infinite"), (PageSize::Letter, "Letter"), (PageSize::A4, "A4")] {
             if ui.selectable_label(app.doc.pages[i].size == size, label).clicked() {
                 app.checkpoint_pages();
                 app.doc.pages[i].size = size;
@@ -448,6 +457,9 @@ fn page_menu(app: &mut PlexiApp, ui: &mut Ui) {
             }
         }
     });
+    if app.doc.pages[i].size == PageSize::Infinite {
+        sheet_settings(app, ui);
+    }
     ui.separator();
     if ui.button("Add page after this one").clicked() {
         app.add_page();
@@ -472,14 +484,77 @@ fn page_menu(app: &mut PlexiApp, ui: &mut Ui) {
     ui.separator();
     ui.label(egui::RichText::new("Pages").weak());
     egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+        let mut delete = None;
         for k in 0..n {
             let name = format!("{}. {}", k + 1, app.doc.pages[k].name);
-            if ui.selectable_label(k == app.page, name).clicked() {
-                app.go_to_page(k);
-                ui.close();
-            }
+            ui.horizontal(|ui| {
+                let x = ui.add(egui::Button::new("✕").frame(false).small()).on_hover_text("Delete this page");
+                if x.clicked() {
+                    delete = Some(k);
+                }
+                if ui.selectable_label(k == app.page, name).clicked() {
+                    app.go_to_page(k);
+                    ui.close();
+                }
+            });
+        }
+        if let Some(k) = delete {
+            app.delete_page_at(k);
         }
     });
+}
+
+/// Paper color swatches plus a custom picker for page `i`.
+fn paper_colors(app: &mut PlexiApp, ui: &mut Ui, i: usize) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let current = app.doc.pages[i].paper;
+        for (name, c) in PAPER_COLORS {
+            if swatch(ui, c, c == current).on_hover_text(name).clicked() {
+                app.checkpoint_pages();
+                set_paper(app, i, c);
+            }
+        }
+        ui.add_space(6.0);
+        let mut rgba = color32(current);
+        if ui.color_edit_button_srgba(&mut rgba).on_hover_text("Any color").changed() {
+            let [r, g, b, _] = rgba.to_srgba_unmultiplied();
+            set_paper(app, i, Color::rgb(r, g, b));
+        }
+    });
+    if app.doc.pages.len() > 1 && ui.small_button("Use this color on every page").clicked() {
+        app.checkpoint_pages();
+        let c = app.doc.pages[i].paper;
+        for p in &mut app.doc.pages {
+            p.paper = c;
+        }
+    }
+}
+
+fn set_paper(app: &mut PlexiApp, i: usize, c: Color) {
+    app.doc.pages[i].paper = c;
+    app.config.new_page_paper = c;
+    app.touch();
+}
+
+/// Sheet outlines on an infinite page: whether to show them and how big they are.
+fn sheet_settings(app: &mut PlexiApp, ui: &mut Ui) {
+    let c = &mut app.config;
+    ui.checkbox(&mut c.sheet_guides, "Show sheet outlines")
+        .on_hover_text("Outlines appear wherever you draw; PDF export prints one sheet per outline");
+    if c.sheet_guides {
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("sheet-paper")
+                .selected_text(PAPERS[c.sheet_paper.min(PAPERS.len() - 1)].0)
+                .show_ui(ui, |ui| {
+                    for (k, (name, _)) in PAPERS.iter().enumerate() {
+                        ui.selectable_value(&mut c.sheet_paper, k, *name);
+                    }
+                });
+            ui.selectable_value(&mut c.sheet_landscape, false, "Portrait");
+            ui.selectable_value(&mut c.sheet_landscape, true, "Landscape");
+        });
+    }
 }
 
 fn file_menu(app: &mut PlexiApp, ui: &mut Ui) {
@@ -661,6 +736,7 @@ enum Cmd {
     Tool(Tool),
     Background(Background),
     Size(PageSize),
+    SheetGuides,
     Fit,
     SelectAll,
     Delete,
@@ -725,9 +801,11 @@ fn commands(app: &PlexiApp) -> Vec<(Cmd, String, String)> {
     for bg in Background::ALL {
         v.push((Cmd::Background(bg), format!("Page background: {}", bg.label()), String::new()));
     }
-    for (s, l) in [(PageSize::Letter, "Letter"), (PageSize::A4, "A4"), (PageSize::Infinite, "Infinite")] {
+    for (s, l) in [(PageSize::Infinite, "Infinite"), (PageSize::Letter, "Letter"), (PageSize::A4, "A4")] {
         v.push((Cmd::Size(s), format!("Page size: {l}"), String::new()));
     }
+    let guides = if app.config.sheet_guides { "Hide sheet outlines" } else { "Show sheet outlines" };
+    v.push((Cmd::SheetGuides, guides.into(), String::new()));
     v
 }
 
@@ -775,6 +853,7 @@ fn run_cmd(app: &mut PlexiApp, ctx: &Context, cmd: Cmd) {
             app.doc.pages[p].size = s;
             app.fit_pending = true;
         }
+        Cmd::SheetGuides => app.config.sheet_guides = !app.config.sheet_guides,
         Cmd::Fit => app.fit_pending = true,
         Cmd::SelectAll => app.select_all(),
         Cmd::Delete => app.delete_selection(),
@@ -866,67 +945,443 @@ fn palette(app: &mut PlexiApp, ctx: &Context) {
     }
 }
 
+// ----- export dialog ------------------------------------------------------------
+
+/// Side of the preview box in points.
+const PREVIEW_SIDE: f32 = 340.0;
+
+type PreviewResult = Result<image::RgbaImage, String>;
+
+/// The export dialog's live preview: the output pages the current settings produce, and
+/// a rendering of the one being looked at (made on a worker thread).
+#[derive(Default)]
+pub struct Preview {
+    /// Settings the frame list was built for.
+    key: String,
+    /// Every output page: which page it shows (`None` is the screen ink) and its frame.
+    frames: Vec<(Option<usize>, OutFrame)>,
+    pub index: usize,
+    texture: Option<egui::TextureHandle>,
+    /// `key#index` of the rendering in `texture`.
+    shown: String,
+    pending: Option<(String, Receiver<PreviewResult>)>,
+    error: Option<String>,
+}
+
+#[cfg(test)]
+impl Preview {
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// A rendering of the current settings is on screen.
+    pub fn ready(&self) -> bool {
+        self.texture.is_some() && self.shown == format!("{}#{}", self.key, self.index)
+    }
+}
+
+/// Formats whose output is a picture of the page, so sheet size and margins apply.
+fn is_visual(f: ExportFormat) -> bool {
+    f.one_page_per_file() || matches!(f, ExportFormat::Pdf | ExportFormat::Html | ExportFormat::Markdown)
+}
+
+fn refresh_preview(app: &mut PlexiApp, ctx: &Context) {
+    let Some(scope) = app.export.as_ref().map(|d| d.scope) else { return };
+    let pages = app.export_pages(scope);
+    let Some(dlg) = app.export.as_mut() else { return };
+    let mut opts = dlg.render_options();
+    if !is_visual(dlg.format) {
+        opts.layout = Default::default();
+    }
+    let doc = &app.doc;
+    let page_of = |i: Option<usize>| i.and_then(|i| doc.pages.get(i)).unwrap_or(&doc.overlay);
+    let key = format!("{:?}|{:?}|{}|{}", opts.layout, pages, app.revision, opts.background);
+    let pv = &mut dlg.preview;
+    if pv.key != key {
+        pv.frames = pages.iter().flat_map(|&i| opts.frames(page_of(i)).into_iter().map(move |f| (i, f))).collect();
+        pv.key = key;
+    }
+    pv.index = pv.index.min(pv.frames.len().saturating_sub(1));
+    let Some(&(page_idx, frame)) = pv.frames.get(pv.index) else { return };
+    let want = format!("{}#{}", pv.key, pv.index);
+
+    if let Some((k, rx)) = &pv.pending {
+        match rx.try_recv() {
+            Ok(r) => {
+                let k = k.clone();
+                pv.pending = None;
+                match r {
+                    Ok(img) => {
+                        let ci = egui::ColorImage::from_rgba_unmultiplied(
+                            [img.width() as usize, img.height() as usize],
+                            img.as_raw(),
+                        );
+                        pv.texture = Some(ctx.load_texture("export-preview", ci, egui::TextureOptions::LINEAR));
+                        pv.error = None;
+                    }
+                    Err(e) => pv.error = Some(e),
+                }
+                pv.shown = k;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => pv.pending = None,
+        }
+    }
+    let busy = pv.pending.as_ref().is_some_and(|(k, _)| *k == want);
+    if pv.shown != want && !busy && pv.pending.is_none() {
+        let page = page_of(page_idx).clone();
+        let assets = doc.assets.clone();
+        let px = PREVIEW_SIDE * ctx.pixels_per_point();
+        opts.scale = (px / frame.size[0].max(frame.size[1]).max(1.0)).min(4.0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let r = plexi_core::export::raster::frame_rgba(&page, &assets, &opts, &frame).map_err(|e| e.to_string());
+            let _ = tx.send(r);
+            repaint.request_repaint();
+        });
+        pv.pending = Some((want, rx));
+    }
+}
+
+/// A light/dark checkerboard, shown under transparent previews.
+fn checkerboard(p: &Painter, r: Rect) {
+    p.rect_filled(r, 0.0, Color32::from_gray(250));
+    let s = 8.0;
+    let (nx, ny) = ((r.width() / s).ceil() as i32, (r.height() / s).ceil() as i32);
+    for y in 0..ny {
+        for x in (y % 2..nx).step_by(2) {
+            let cell = Rect::from_min_size(r.min + vec2(x as f32 * s, y as f32 * s), vec2(s, s)).intersect(r);
+            p.rect_filled(cell, 0.0, Color32::from_gray(225));
+        }
+    }
+}
+
+fn fmt_in(units: f32) -> String {
+    let v = units / 96.0;
+    let s = format!("{v:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
 fn export_window(app: &mut PlexiApp, ctx: &Context) {
+    if app.export.is_none() {
+        return;
+    }
+    refresh_preview(app, ctx);
+    let fixed_page = app.doc.pages[app.page].size.dims().is_some();
+    let has_pages = app.doc.pages.len() > 1;
+    let th_canvas = ctx.global_style().visuals.extreme_bg_color;
     let Some(dlg) = &mut app.export else { return };
     let mut open = true;
     let mut go = false;
-    let has_pages = app.doc.pages.len() > 1;
     egui::Window::new("Export")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
         .show(ctx, |ui| {
-            egui::Grid::new("export-grid").num_columns(2).spacing(vec2(12.0, 10.0)).show(ui, |ui| {
-                ui.label("Format");
-                egui::ComboBox::from_id_salt("export-format")
-                    .selected_text(format!("{}  (.{})", dlg.format.label(), dlg.format.extension()))
-                    .width(240.0)
-                    .show_ui(ui, |ui| {
-                        for f in ExportFormat::ALL {
-                            ui.selectable_value(&mut dlg.format, f, format!("{}  (.{})", f.label(), f.extension()));
-                        }
-                    });
-                ui.end_row();
-                ui.label("What");
+            ui.horizontal_top(|ui| {
+                // ---- preview ----
                 ui.vertical(|ui| {
-                    ui.radio_value(&mut dlg.scope, ExportScope::CurrentPage, "This page");
-                    if has_pages {
-                        ui.radio_value(&mut dlg.scope, ExportScope::AllPages, "All pages");
+                    let (area, _) = ui.allocate_exact_size(vec2(PREVIEW_SIDE, PREVIEW_SIDE), Sense::hover());
+                    let p = ui.painter_at(area);
+                    p.rect_filled(area, 8.0, th_canvas);
+                    let pv = &dlg.preview;
+                    let frame = pv.frames.get(pv.index).map(|f| f.1);
+                    if let (Some(tex), Some(frame)) = (&pv.texture, frame) {
+                        let inner = area.shrink(14.0);
+                        let aspect = frame.size[0] / frame.size[1].max(1.0);
+                        let size = if aspect > inner.width() / inner.height() {
+                            vec2(inner.width(), inner.width() / aspect)
+                        } else {
+                            vec2(inner.height() * aspect, inner.height())
+                        };
+                        let r = Rect::from_center_size(inner.center(), size);
+                        p.rect_filled(r.translate(vec2(0.0, 2.0)).expand(1.0), 2.0, Color32::from_black_alpha(40));
+                        checkerboard(&p, r);
+                        p.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                        if pv.pending.is_some() {
+                            p.rect_filled(r, 0.0, Color32::from_white_alpha(60));
+                        }
+                    } else if let Some(e) = &pv.error {
+                        p.text(area.center(), Align2::CENTER_CENTER, e, egui::FontId::proportional(13.0), Color32::RED);
+                    } else {
+                        ui.put(Rect::from_center_size(area.center(), vec2(24.0, 24.0)), egui::Spinner::new());
                     }
-                    ui.radio_value(&mut dlg.scope, ExportScope::ScreenInk, "Screen ink (overlay)");
-                });
-                ui.end_row();
-                if dlg.format.uses_scale() || dlg.format == ExportFormat::Markdown {
-                    ui.label("Resolution");
+                    let n = dlg.preview.frames.len();
                     ui.horizontal(|ui| {
-                        for s in [1.0, 2.0, 3.0, 4.0] {
-                            ui.selectable_value(&mut dlg.scale, s, format!("{s}×"));
+                        let one_file = dlg.format.one_page_per_file() || dlg.format == ExportFormat::Markdown;
+                        let what = if one_file { "Image" } else { "Page" };
+                        if n > 1 {
+                            if icon_button(ui, Icon::Left, false, "Previous").clicked() {
+                                dlg.preview.index = dlg.preview.index.saturating_sub(1);
+                            }
+                            ui.label(format!("{what} {} of {n}", dlg.preview.index + 1));
+                            if icon_button(ui, Icon::Right, false, "Next").clicked() {
+                                dlg.preview.index = (dlg.preview.index + 1).min(n - 1);
+                            }
+                        }
+                        if let Some(f) = frame {
+                            let dims = if dlg.format.uses_scale() || dlg.format == ExportFormat::Markdown {
+                                let s = dlg.scale;
+                                format!("{} × {} px", (f.size[0] * s).ceil(), (f.size[1] * s).ceil())
+                            } else {
+                                format!("{} × {} in", fmt_in(f.size[0]), fmt_in(f.size[1]))
+                            };
+                            ui.weak(dims);
                         }
                     });
-                    ui.end_row();
-                }
-                ui.label("Background");
-                ui.checkbox(&mut dlg.background, "Paper and lines");
-                ui.end_row();
-            });
-            if dlg.format.one_page_per_file() && dlg.scope == ExportScope::AllPages {
-                ui.weak("One file per page: name-1, name-2, …");
-            }
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .add(egui::Button::new(egui::RichText::new("Export…").color(Color32::WHITE)).fill(ACCENT))
-                    .clicked()
-                {
-                    go = true;
-                }
+                });
+                ui.add_space(8.0);
+
+                // ---- options ----
+                ui.vertical(|ui| {
+                    ui.set_width(300.0);
+                    egui::Grid::new("export-grid").num_columns(2).spacing(vec2(12.0, 10.0)).show(ui, |ui| {
+                        ui.label("Format");
+                        egui::ComboBox::from_id_salt("export-format")
+                            .selected_text(format!("{}  (.{})", dlg.format.label(), dlg.format.extension()))
+                            .width(210.0)
+                            .show_ui(ui, |ui| {
+                                for f in ExportFormat::ALL {
+                                    let l = format!("{}  (.{})", f.label(), f.extension());
+                                    ui.selectable_value(&mut dlg.format, f, l);
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("What");
+                        ui.vertical(|ui| {
+                            ui.radio_value(&mut dlg.scope, ExportScope::CurrentPage, "This page");
+                            if has_pages {
+                                ui.radio_value(&mut dlg.scope, ExportScope::AllPages, "All pages");
+                            }
+                            ui.radio_value(&mut dlg.scope, ExportScope::ScreenInk, "Screen ink (overlay)");
+                        });
+                        ui.end_row();
+
+                        if is_visual(dlg.format) {
+                            ui.label("Area");
+                            ui.vertical(|ui| {
+                                let whole = if fixed_page { "Whole page" } else { "Everything drawn" };
+                                ui.radio_value(&mut dlg.area, Area::Page, whole);
+                                ui.radio_value(&mut dlg.area, Area::Content, "Trim to the drawing");
+                            });
+                            ui.end_row();
+
+                            ui.label("Paper");
+                            let fit_label = if fixed_page { "Same as the page" } else { "Fit to the drawing" };
+                            let current = match dlg.paper {
+                                PaperChoice::Fit => fit_label.to_owned(),
+                                PaperChoice::Preset(i) => PAPERS[i.min(PAPERS.len() - 1)].0.to_owned(),
+                                PaperChoice::Custom => "Custom".to_owned(),
+                            };
+                            egui::ComboBox::from_id_salt("export-paper").selected_text(current).width(210.0).show_ui(
+                                ui,
+                                |ui| {
+                                    ui.selectable_value(&mut dlg.paper, PaperChoice::Fit, fit_label);
+                                    for (k, (name, d)) in PAPERS.iter().enumerate() {
+                                        let l = format!("{name}  ({} × {} in)", fmt_in(d[0]), fmt_in(d[1]));
+                                        if ui.selectable_value(&mut dlg.paper, PaperChoice::Preset(k), l).clicked()
+                                            && name.starts_with("Slide")
+                                        {
+                                            dlg.landscape = true;
+                                        }
+                                    }
+                                    ui.selectable_value(&mut dlg.paper, PaperChoice::Custom, "Custom…");
+                                },
+                            );
+                            ui.end_row();
+
+                            match dlg.paper {
+                                PaperChoice::Fit => {}
+                                PaperChoice::Custom => {
+                                    ui.label("Size");
+                                    ui.horizontal(|ui| {
+                                        let [w, h] = &mut dlg.custom_in;
+                                        ui.add(egui::DragValue::new(w).range(1.0..=100.0).speed(0.05).suffix(" in"));
+                                        ui.label("×");
+                                        ui.add(egui::DragValue::new(h).range(1.0..=100.0).speed(0.05).suffix(" in"));
+                                    });
+                                    ui.end_row();
+                                }
+                                PaperChoice::Preset(_) => {
+                                    ui.label("Orientation");
+                                    ui.horizontal(|ui| {
+                                        ui.selectable_value(&mut dlg.landscape, false, "Portrait");
+                                        ui.selectable_value(&mut dlg.landscape, true, "Landscape");
+                                    });
+                                    ui.end_row();
+                                }
+                            }
+                            if dlg.paper != PaperChoice::Fit {
+                                ui.label("Fit");
+                                ui.vertical(|ui| {
+                                    ui.radio_value(&mut dlg.tile, false, "Shrink onto one sheet");
+                                    ui.radio_value(&mut dlg.tile, true, "Split across sheets, full size")
+                                        .on_hover_text("One sheet per outline on the canvas; empty sheets are skipped");
+                                });
+                                ui.end_row();
+                            }
+                            ui.label("Margin");
+                            ui.add_enabled(
+                                !(dlg.tile && dlg.paper != PaperChoice::Fit),
+                                egui::Slider::new(&mut dlg.margin_in, 0.0..=2.0).step_by(0.05).suffix(" in"),
+                            );
+                            ui.end_row();
+                        }
+
+                        if dlg.format.uses_scale() || dlg.format == ExportFormat::Markdown {
+                            ui.label("Resolution");
+                            ui.horizontal(|ui| {
+                                for s in [1.0, 2.0, 3.0, 4.0] {
+                                    ui.selectable_value(&mut dlg.scale, s, format!("{s}×"));
+                                }
+                            });
+                            ui.end_row();
+                            if let Some(f) = dlg.preview.frames.get(dlg.preview.index).map(|f| f.1) {
+                                ui.label("Width");
+                                let mut px = (f.size[0] * dlg.scale).round();
+                                let r = ui
+                                    .add(egui::DragValue::new(&mut px).range(16.0..=16384.0).speed(4.0).suffix(" px"));
+                                if r.changed() {
+                                    dlg.scale = (px / f.size[0].max(1.0)).clamp(0.05, 16.0);
+                                }
+                                ui.end_row();
+                            }
+                        }
+                        ui.label("Background");
+                        ui.checkbox(&mut dlg.background, "Paper and lines");
+                        ui.end_row();
+                    });
+                    if !is_visual(dlg.format) {
+                        ui.weak("This format keeps the drawing itself, so paper and size don't apply.");
+                    } else if dlg.format.one_page_per_file() && dlg.preview.frames.len() > 1 {
+                        ui.weak("One file per image: name-1, name-2, …");
+                    }
+                    ui.add_space(6.0);
+                    let label = egui::RichText::new("Export…").color(Color32::WHITE);
+                    if ui.add(egui::Button::new(label).fill(ACCENT).min_size(vec2(96.0, 30.0))).clicked() {
+                        go = true;
+                    }
+                });
             });
         });
     if !open {
         app.export = None;
     } else if go {
         app.run_export();
+    }
+}
+
+// ----- right-click menu -----------------------------------------------------------
+
+fn context_menu(app: &mut PlexiApp, ctx: &Context) {
+    let Some(menu) = app.context_menu.clone() else { return };
+    if ctx.input(|i| i.key_pressed(Key::Escape)) {
+        app.context_menu = None;
+        return;
+    }
+    let t = menu.target;
+    let hit = menu.hit.and_then(|id| app.page_ref(t).elements.iter().find(|e| e.id() == id).cloned());
+    let locked_ids: std::collections::HashSet<u64> =
+        app.page_ref(t).elements.iter().filter(|e| e.locked()).map(Element::id).collect();
+    let mut close = false;
+    let resp = egui::Area::new(Id::unique("context-menu"))
+        .fixed_pos(menu.pos)
+        .order(Order::Foreground)
+        .constrain(true)
+        .show(ctx, |ui| {
+            pill(ui).inner_margin(6).show(ui, |ui| {
+                ui.set_min_width(200.0);
+                ui.spacing_mut().button_padding = vec2(10.0, 4.0);
+                let item = |ui: &mut Ui, text: &str| {
+                    ui.add(egui::Button::new(text).frame(false).min_size(vec2(190.0, 24.0))).clicked()
+                };
+                if let Some(Element::Image(img)) = &hit {
+                    let ids = [img.id].into();
+                    if img.locked {
+                        if item(ui, "Unlock image") {
+                            app.set_locked(t, &ids, false);
+                            app.selection = ids;
+                            app.tool = Tool::Lasso;
+                            close = true;
+                        }
+                    } else {
+                        if item(ui, "Lock image") {
+                            app.set_locked(t, &ids, true);
+                            close = true;
+                        }
+                        if item(ui, "Reset to original size") {
+                            app.reset_image_size(t, img.id, ctx.pixels_per_point());
+                            close = true;
+                        }
+                    }
+                    ui.separator();
+                }
+                if !app.selection.is_empty() {
+                    if item(ui, "Bring to front") {
+                        app.restack_selection(true);
+                        close = true;
+                    }
+                    if item(ui, "Send to back") {
+                        app.restack_selection(false);
+                        close = true;
+                    }
+                    if item(ui, "Duplicate") {
+                        app.duplicate_selection();
+                        close = true;
+                    }
+                    if item(ui, "Delete") {
+                        app.delete_selection();
+                        close = true;
+                    }
+                    ui.separator();
+                }
+                if !locked_ids.is_empty() && item(ui, &format!("Unlock all images ({})", locked_ids.len())) {
+                    app.set_locked(t, &locked_ids, false);
+                    close = true;
+                }
+                if item(ui, "Select all") {
+                    app.select_all();
+                    close = true;
+                }
+                match t {
+                    crate::history::Target::Page(i) => {
+                        ui.separator();
+                        ui.weak("Paper");
+                        paper_colors(app, ui, i);
+                        ui.horizontal(|ui| {
+                            for bg in Background::ALL {
+                                if ui.selectable_label(app.doc.pages[i].background == bg, bg.label()).clicked() {
+                                    app.checkpoint_pages();
+                                    app.doc.pages[i].background = bg;
+                                    app.config.new_page_background = bg;
+                                }
+                            }
+                        });
+                        ui.separator();
+                        let label = if app.doc.pages.len() > 1 { "Delete this page" } else { "Clear this page" };
+                        if item(ui, label) {
+                            app.delete_page_at(i);
+                            close = true;
+                        }
+                    }
+                    crate::history::Target::Overlay => {
+                        ui.separator();
+                        if item(ui, "Clear screen ink") {
+                            app.clear_overlay();
+                            close = true;
+                        }
+                    }
+                }
+            });
+        });
+    let r = resp.response.rect;
+    let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !r.contains(p)));
+    // Pickers inside the menu open their own popups; don't treat those clicks as outside.
+    let popup_open = egui::Popup::is_any_open(ctx);
+    if close || (outside && !popup_open) {
+        app.context_menu = None;
     }
 }
 
@@ -993,6 +1448,8 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
             ("Colors", "1 – 9".into()),
             ("Thinner / thicker", "[ · ]".into()),
             ("Erase with any tool", "Right-drag (or pen barrel button)".into()),
+            ("Menu: lock image, arrange, paper, delete page", "Right-click".into()),
+            ("Resize an image", "Select it, drag a corner (Shift: free)".into()),
             ("Pan", "Scroll · Space+drag · middle-drag · two fingers".into()),
             ("Zoom", "Ctrl+scroll · pinch · Ctrl+= / Ctrl+-".into()),
             ("Fit page", "Ctrl+0".into()),
@@ -1036,6 +1493,7 @@ fn toast(app: &mut PlexiApp, ctx: &Context) {
 }
 
 pub fn dialogs(app: &mut PlexiApp, ctx: &Context) {
+    context_menu(app, ctx);
     palette(app, ctx);
     export_window(app, ctx);
     settings_window(app, ctx);

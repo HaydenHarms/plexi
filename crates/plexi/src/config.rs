@@ -34,9 +34,14 @@ pub fn scratch_path() -> PathBuf {
     data_dir().join("Untitled.plexi")
 }
 
+const CONFIG_VERSION: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Settings layout version, for one-time migrations. Missing in old files (0).
+    #[serde(default)]
+    pub version: u32,
     /// File open at last exit; reopened on launch.
     pub last_file: Option<PathBuf>,
     pub recent: Vec<PathBuf>,
@@ -50,6 +55,12 @@ pub struct Config {
     pub eraser_partial: bool,
     pub new_page_size: PageSize,
     pub new_page_background: Background,
+    pub new_page_paper: Color,
+    /// Outline the sheets that hold something on infinite pages.
+    pub sheet_guides: bool,
+    /// Sheet size for those outlines and the export default: an index into `PAPERS`.
+    pub sheet_paper: usize,
+    pub sheet_landscape: bool,
     /// Toggle overlay drawing (and click-through) from anywhere.
     pub hotkey_draw: String,
     /// Clear the overlay ink from anywhere.
@@ -64,6 +75,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            version: CONFIG_VERSION,
             last_file: None,
             recent: Vec::new(),
             smoothing: 0.35,
@@ -86,8 +98,12 @@ impl Default for Config {
             highlighter_width: 20.0,
             eraser_size: 14.0,
             eraser_partial: false,
-            new_page_size: PageSize::Letter,
+            new_page_size: PageSize::Infinite,
             new_page_background: Background::Blank,
+            new_page_paper: Color::WHITE,
+            sheet_guides: true,
+            sheet_paper: 0,
+            sheet_landscape: false,
             hotkey_draw: "Ctrl+Alt+D".into(),
             hotkey_clear: "Ctrl+Alt+X".into(),
             hotkey_notebook: "Ctrl+Alt+N".into(),
@@ -103,7 +119,21 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        std::fs::read(Self::path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        let mut c: Config =
+            std::fs::read(Self::path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        if c.version < 2 {
+            // 0.1 defaulted new notes to Letter sheets; they now start as an infinite canvas.
+            c.new_page_size = PageSize::Infinite;
+        }
+        c.version = CONFIG_VERSION;
+        c
+    }
+
+    /// Sheet size for guides and exports, in page units.
+    pub fn sheet_size(&self) -> [f32; 2] {
+        let papers = plexi_core::export::layout::PAPERS;
+        let [w, h] = papers[self.sheet_paper.min(papers.len() - 1)].1;
+        if self.sheet_landscape { [h, w] } else { [w, h] }
     }
 
     pub fn save(&self) {

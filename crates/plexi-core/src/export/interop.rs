@@ -122,7 +122,7 @@ pub fn excalidraw(pages: &[&Page], assets: &Assets) -> Result<String, ExportErro
                             1.0,
                             n,
                         ),
-                        json!({ "fileId": file_id, "status": "saved", "scale": [1, 1] }),
+                        json!({ "fileId": file_id, "status": "saved", "scale": [1, 1], "locked": img.locked }),
                     ));
                 }
                 Element::Shape(s) => {

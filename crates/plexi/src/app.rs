@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use egui::{Context, Key, Modifiers, ViewportCommand};
 #[cfg(test)]
 use plexi_core::Shape;
+use plexi_core::export::layout::{self, Area, Layout};
 use plexi_core::export::{ExportFormat, RenderOptions};
 use plexi_core::{Color, Document, Element, ImageEl, InkKind, Page, ShapeKind, TextBox, format, new_id};
 
@@ -86,11 +87,61 @@ pub enum ExportScope {
     ScreenInk,
 }
 
+/// What sheet an export is laid out on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperChoice {
+    /// Each output is exactly the page (or the drawing) size.
+    Fit,
+    /// One of `layout::PAPERS`.
+    Preset(usize),
+    Custom,
+}
+
 pub struct ExportDialog {
     pub format: ExportFormat,
     pub scope: ExportScope,
     pub scale: f32,
     pub background: bool,
+    pub area: Area,
+    pub paper: PaperChoice,
+    pub landscape: bool,
+    /// Custom sheet size in inches.
+    pub custom_in: [f32; 2],
+    /// Split across sheets at full size instead of shrinking onto one.
+    pub tile: bool,
+    /// Margin in inches.
+    pub margin_in: f32,
+    pub preview: crate::ui::Preview,
+}
+
+impl ExportDialog {
+    pub fn sheet(&self) -> Option<[f32; 2]> {
+        let [w, h] = match self.paper {
+            PaperChoice::Fit => return None,
+            PaperChoice::Preset(i) => layout::PAPERS[i.min(layout::PAPERS.len() - 1)].1,
+            PaperChoice::Custom => [self.custom_in[0] * 96.0, self.custom_in[1] * 96.0],
+        };
+        let landscape = self.landscape && self.paper != PaperChoice::Custom;
+        Some(if landscape { [h, w] } else { [w, h] })
+    }
+
+    pub fn layout(&self) -> Layout {
+        Layout { area: self.area, sheet: self.sheet(), tile: self.tile, margin: self.margin_in * 96.0 }
+    }
+
+    pub fn render_options(&self) -> RenderOptions {
+        RenderOptions { scale: self.scale, background: self.background, text: true, layout: self.layout() }
+    }
+}
+
+/// The right-click menu on the canvas.
+#[derive(Clone, Debug)]
+pub struct ContextMenu {
+    /// Screen position it opened at.
+    pub pos: egui::Pos2,
+    pub target: Target,
+    /// Element under the pointer, if any (locked images included).
+    pub hit: Option<u64>,
 }
 
 #[derive(Default)]
@@ -153,6 +204,13 @@ pub struct PlexiApp {
     pub settings_open: bool,
     pub help_open: bool,
     pub toast: Option<Toast>,
+    pub context_menu: Option<ContextMenu>,
+    /// Top-left of the canvas on screen, as of the last frame.
+    pub canvas_origin: egui::Pos2,
+    /// Bumped on every document change; caches keyed on it (sheet guides, export
+    /// preview) know when to rebuild.
+    pub revision: u64,
+    pub sheet_cache: Option<(u64, usize, [f32; 2], Vec<plexi_core::Rect>)>,
     shell: Option<Shell>,
     hwnd: Option<isize>,
     notebook_geometry: Option<NotebookGeometry>,
@@ -200,6 +258,10 @@ impl PlexiApp {
             settings_open: false,
             help_open: false,
             toast: None,
+            context_menu: None,
+            canvas_origin: egui::Pos2::ZERO,
+            revision: 0,
+            sheet_cache: None,
             shell: None,
             hwnd: None,
             notebook_geometry: None,
@@ -279,6 +341,7 @@ impl PlexiApp {
     pub fn touch(&mut self) {
         self.dirty = true;
         self.last_edit = Instant::now();
+        self.revision += 1;
     }
 
     fn restore(&mut self, s: Snapshot) -> Snapshot {
@@ -337,6 +400,8 @@ impl PlexiApp {
         self.fit_pending = true;
         self.textures.clear();
         self.dirty = false;
+        self.context_menu = None;
+        self.revision += 1;
     }
 
     pub fn open_path(&mut self, p: &Path) {
@@ -386,6 +451,7 @@ impl PlexiApp {
         let page = &mut self.doc.pages[0];
         page.size = self.config.new_page_size;
         page.background = self.config.new_page_background;
+        page.paper = self.config.new_page_paper;
         self.path = None;
         self.config.last_file = None;
         self.config.save();
@@ -505,10 +571,19 @@ impl PlexiApp {
 
     // ----- export ----------------------------------------------------------------
 
+    /// The pages an export of `scope` covers, as indices (`None` is the screen ink).
+    pub fn export_pages(&self, scope: ExportScope) -> Vec<Option<usize>> {
+        match scope {
+            ExportScope::CurrentPage => vec![Some(self.page)],
+            ExportScope::AllPages => (0..self.doc.pages.len()).map(Some).collect(),
+            ExportScope::ScreenInk => vec![None],
+        }
+    }
+
     pub fn run_export(&mut self) {
         let Some(dlg) = &self.export else { return };
         let (format, scope) = (dlg.format, dlg.scope);
-        let opts = RenderOptions { scale: dlg.scale, background: dlg.background, text: true };
+        let opts = dlg.render_options();
         let stem = match scope {
             ExportScope::CurrentPage if self.doc.pages.len() > 1 => {
                 format!("{} - {}", self.display_name(), self.doc.pages[self.page].name)
@@ -549,21 +624,36 @@ impl PlexiApp {
         self.finish_text_edit();
         self.checkpoint_pages();
         let mut p = Page::new(format!("Page {}", self.doc.pages.len() + 1), self.config.new_page_size);
-        p.background = self.doc.pages[self.page].background;
-        p.size = self.doc.pages[self.page].size;
+        let cur = &self.doc.pages[self.page];
+        (p.background, p.size, p.paper) = (cur.background, cur.size, cur.paper);
         self.doc.pages.insert(self.page + 1, p);
         self.go_to_page(self.page + 1);
     }
 
     pub fn delete_page(&mut self) {
+        self.delete_page_at(self.page);
+    }
+
+    /// Delete page `i` (or clear it when it is the only one). Undo brings it back.
+    pub fn delete_page_at(&mut self, i: usize) {
+        if i >= self.doc.pages.len() {
+            return;
+        }
+        self.finish_text_edit();
         self.checkpoint_pages();
+        let name = self.doc.pages[i].name.clone();
         if self.doc.pages.len() == 1 {
             self.doc.pages[0].elements.clear();
+            self.toast("Page cleared — Ctrl+Z to undo");
         } else {
-            self.doc.pages.remove(self.page);
-            self.page = self.page.min(self.doc.pages.len() - 1);
+            self.doc.pages.remove(i);
+            if i < self.page || self.page >= self.doc.pages.len() {
+                self.page = self.page.saturating_sub(1);
+            }
+            self.toast(format!("Deleted “{name}” — Ctrl+Z to undo"));
         }
         self.selection.clear();
+        self.interaction = Interaction::Idle;
         self.fit_pending = true;
     }
 
@@ -616,7 +706,7 @@ impl PlexiApp {
         self.checkpoint(t);
         let asset = self.doc.add_asset(stored);
         let id = new_id();
-        self.page_mut(t).elements.push(Element::Image(ImageEl { id, asset, pos, size }));
+        self.page_mut(t).elements.push(Element::Image(ImageEl { id, asset, pos, size, locked: false }));
         self.selection = [id].into();
         self.tool = Tool::Lasso;
     }
@@ -722,7 +812,61 @@ impl PlexiApp {
 
     pub fn select_all(&mut self) {
         self.tool = Tool::Lasso;
-        self.selection = self.page_ref(self.target()).elements.iter().map(Element::id).collect();
+        self.selection =
+            self.page_ref(self.target()).elements.iter().filter(|e| !e.locked()).map(Element::id).collect();
+    }
+
+    /// Lock or unlock images. Locked images stay put: no selecting, moving or resizing.
+    pub fn set_locked(&mut self, t: Target, ids: &HashSet<u64>, locked: bool) {
+        self.checkpoint(t);
+        for e in &mut self.page_mut(t).elements {
+            if let Element::Image(img) = e
+                && ids.contains(&img.id)
+            {
+                img.locked = locked;
+            }
+        }
+        if locked {
+            self.selection.retain(|id| !ids.contains(id));
+        }
+    }
+
+    /// Move the selection to the top (`front`) or bottom of the stacking order.
+    pub fn restack_selection(&mut self, front: bool) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let t = self.target();
+        self.checkpoint(t);
+        let sel = self.selection.clone();
+        let els = std::mem::take(&mut self.page_mut(t).elements);
+        let (picked, rest): (Vec<Element>, Vec<Element>) = els.into_iter().partition(|e| sel.contains(&e.id()));
+        self.page_mut(t).elements = if front { [rest, picked].concat() } else { [picked, rest].concat() };
+    }
+
+    /// Give image `id` its natural size (one image pixel per screen pixel), keeping its center.
+    pub fn reset_image_size(&mut self, t: Target, id: u64, ppp: f32) {
+        let Some(Element::Image(img)) = self.page_ref(t).elements.iter().find(|e| e.id() == id) else { return };
+        let Some(bytes) = self.doc.assets.get(&img.asset) else { return };
+        let dims = image::ImageReader::new(std::io::Cursor::new(bytes.as_slice()))
+            .with_guessed_format()
+            .ok()
+            .and_then(|r| r.into_dimensions().ok());
+        let Some((w, h)) = dims else { return };
+        self.checkpoint(t);
+        let page = self.page_mut(t);
+        if let Some(i) = page.find(id)
+            && let Element::Image(img) = &mut page.elements[i]
+        {
+            let c = [img.pos[0] + img.size[0] / 2.0, img.pos[1] + img.size[1] / 2.0];
+            img.size = [w as f32 / ppp, h as f32 / ppp];
+            img.pos = [c[0] - img.size[0] / 2.0, c[1] - img.size[1] / 2.0];
+            page.elements[i].renew_id();
+            let new = page.elements[i].id();
+            if self.selection.remove(&id) {
+                self.selection.insert(new);
+            }
+        }
     }
 
     /// Clicking a swatch with a selection recolors it.
@@ -977,7 +1121,13 @@ impl PlexiApp {
         }
         let mut page = Page::new(format!("Screen {}", self.doc.pages.len() + 1), plexi_core::PageSize::Custom([w, h]));
         let asset = self.doc.add_asset(png.into_inner());
-        page.elements.push(Element::Image(ImageEl { id: new_id(), asset, pos: [0.0, 0.0], size: [w, h] }));
+        page.elements.push(Element::Image(ImageEl {
+            id: new_id(),
+            asset,
+            pos: [0.0, 0.0],
+            size: [w, h],
+            locked: true,
+        }));
         page.elements.extend(self.doc.overlay.elements.iter().cloned());
         match action {
             SnapshotAction::ToPage => {
@@ -988,7 +1138,7 @@ impl PlexiApp {
                 self.toast("Screen saved as a new notebook page");
             }
             SnapshotAction::Copy | SnapshotAction::SaveImage => {
-                let opts = RenderOptions { scale: ppp, background: false, text: true };
+                let opts = RenderOptions { scale: ppp, background: false, ..Default::default() };
                 let img = match plexi_core::export::raster::page_rgba(&page, &self.doc.assets, &opts) {
                     Ok(i) => i,
                     Err(e) => {
@@ -1226,8 +1376,22 @@ impl PlexiApp {
     pub fn open_export_dialog(&mut self) {
         self.finish_text_edit();
         let scope = if self.is_overlay() { ExportScope::ScreenInk } else { ExportScope::CurrentPage };
-        self.export =
-            Some(ExportDialog { format: ExportFormat::Pdf, scope, scale: 2.0, background: !self.is_overlay() });
+        // An infinite canvas prints on the sheets its guides show; a fixed page as itself.
+        let infinite = !self.is_overlay() && self.doc.pages[self.page].size.dims().is_none();
+        let paper = if infinite { PaperChoice::Preset(self.config.sheet_paper) } else { PaperChoice::Fit };
+        self.export = Some(ExportDialog {
+            format: ExportFormat::Pdf,
+            scope,
+            scale: 2.0,
+            background: !self.is_overlay(),
+            area: Area::Page,
+            paper,
+            landscape: self.config.sheet_landscape,
+            custom_in: [8.5, 11.0],
+            tile: infinite,
+            margin_in: 0.0,
+            preview: Default::default(),
+        });
     }
 
     fn update_title(&mut self, ctx: &Context) {
@@ -1253,6 +1417,11 @@ impl eframe::App for PlexiApp {
         let ctx = ui.ctx().clone();
         if self.hwnd.is_none() {
             self.hwnd = platform::native_handle(frame);
+            if let Some(h) = self.hwnd
+                && self.start.as_ref().is_some_and(|s| !s.overlay && !s.background)
+            {
+                platform::fit_to_work_area(h);
+            }
         }
         if let Some(start) = self.start.take()
             && (start.overlay || start.background)
@@ -1477,5 +1646,126 @@ mod tests {
         let back = format::load(&path).unwrap();
         assert_eq!(back.pages[0].elements.len(), 1);
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(w, h, image::Rgba([200, 30, 30, 255]))
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    fn image_el(h: &Harness) -> ImageEl {
+        h.elements()
+            .iter()
+            .find_map(|e| match e {
+                Element::Image(i) => Some(i.clone()),
+                _ => None,
+            })
+            .expect("an image")
+    }
+
+    #[test]
+    fn images_resize_lock_and_unlock() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.insert_image(png(100, 50), None, &ctx);
+        h.step(vec![]);
+        let img = image_el(&h);
+        assert_eq!(img.size, [100.0, 50.0]);
+        let view = h.app.view;
+        let corner = view.to_screen(h.app.canvas_origin, [img.pos[0] + 100.0, img.pos[1] + 50.0]);
+        // Drag the bottom-right handle 100 points right: proportions are kept.
+        h.drag(
+            PointerButton::Primary,
+            &[(corner.x, corner.y), (corner.x + 50.0, corner.y), (corner.x + 100.0, corner.y)],
+        );
+        let big = image_el(&h);
+        assert!((big.size[0] - 200.0).abs() < 1.0 && (big.size[1] - 100.0).abs() < 1.0, "{:?}", big.size);
+        assert_eq!(big.pos, img.pos, "the opposite corner stays put");
+        assert!(h.app.selection.contains(&big.id), "the resized image stays selected");
+        h.app.undo();
+        assert_eq!(image_el(&h).size, [100.0, 50.0]);
+
+        // Right-click opens the menu on the image instead of erasing.
+        let mid = view.to_screen(h.app.canvas_origin, [img.pos[0] + 50.0, img.pos[1] + 25.0]);
+        h.drag(PointerButton::Secondary, &[(mid.x, mid.y)]);
+        let menu = h.app.context_menu.clone().expect("context menu");
+        assert_eq!(menu.hit, Some(image_el(&h).id));
+        h.app.context_menu = None;
+
+        let id = image_el(&h).id;
+        h.app.set_locked(Target::Page(0), &[id].into(), true);
+        h.app.selection.clear();
+        h.app.tool = Tool::Lasso;
+        h.click(mid.x, mid.y);
+        assert!(h.app.selection.is_empty(), "locked images can't be picked up");
+        let before = image_el(&h).pos;
+        h.drag(PointerButton::Primary, &[(mid.x, mid.y), (mid.x + 40.0, mid.y), (mid.x + 80.0, mid.y + 10.0)]);
+        assert_eq!(image_el(&h).pos, before, "dragging over a locked image starts a lasso, not a move");
+        h.app.select_all();
+        assert!(h.app.selection.is_empty());
+        h.app.set_locked(Target::Page(0), &[id].into(), false);
+        h.click(mid.x, mid.y);
+        assert!(h.app.selection.contains(&id), "unlocked images can be clicked again");
+    }
+
+    #[test]
+    fn right_click_opens_the_menu_and_right_drag_still_erases() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(200.0, 600.0, 300.0));
+        h.drag(PointerButton::Secondary, &[(400.0, 300.0)]);
+        assert_eq!(h.elements().len(), 1, "a right click doesn't erase");
+        assert!(h.app.context_menu.is_some());
+        // The next press only dismisses the menu.
+        h.click(100.0, 600.0);
+        assert!(h.app.context_menu.is_none());
+        assert_eq!(h.elements().len(), 1);
+        h.drag(PointerButton::Secondary, &[(400.0, 250.0), (400.0, 300.0), (400.0, 350.0)]);
+        assert!(h.elements().is_empty());
+    }
+
+    #[test]
+    fn deleting_pages() {
+        let mut h = Harness::new();
+        h.app.add_page();
+        h.app.add_page();
+        assert_eq!(h.app.doc.pages.len(), 3);
+        h.app.doc.pages[1].name = "Middle".into();
+        h.app.go_to_page(2);
+        h.app.delete_page_at(1);
+        assert_eq!(h.app.doc.pages.len(), 2);
+        assert_eq!(h.app.page, 1, "still on the same page after deleting one before it");
+        assert!(h.app.doc.pages.iter().all(|p| p.name != "Middle"));
+        h.app.undo();
+        assert_eq!(h.app.doc.pages.len(), 3);
+        h.app.delete_page();
+        h.app.delete_page();
+        h.app.delete_page();
+        assert_eq!(h.app.doc.pages.len(), 1, "the last page is cleared, never removed");
+    }
+
+    #[test]
+    fn new_notes_are_an_infinite_canvas_with_sheets() {
+        let mut h = Harness::new();
+        assert!(h.app.doc.pages[0].size.dims().is_none());
+        h.drag(PointerButton::Primary, &line(200.0, 400.0, 300.0));
+        h.drag(PointerButton::Primary, &line(880.0, 960.0, 300.0)); // past the first sheet's right edge
+        h.step(vec![]);
+        let sheets = h.app.sheet_cache.as_ref().map(|c| c.3.len());
+        assert_eq!(sheets, Some(2), "a second sheet appears where the ink went");
+        h.app.open_export_dialog();
+        for _ in 0..200 {
+            h.step(vec![]);
+            let pv = &h.app.export.as_ref().unwrap().preview;
+            if pv.ready() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let dlg = h.app.export.as_ref().unwrap();
+        assert_eq!(dlg.preview.frame_count(), 2, "PDF export defaults to one sheet per outline");
+        assert!(dlg.preview.ready(), "the preview rendered");
     }
 }

@@ -94,8 +94,21 @@ fn main() {
         color: ink,
     }));
 
+    // The page is an infinite canvas: this spills onto the sheet to the right.
+    page.elements.push(Element::Text(TextBox {
+        id: new_id(),
+        pos: [880.0, 140.0],
+        text: "Side note, one sheet over".into(),
+        size: 22.0,
+        color: blue,
+    }));
+    page.elements.push(wave(880.0, 220.0, 520.0, 18.0, 3.0, blue, 3.0));
+
     let mut grid = Page::new("Sketches", PageSize::Letter);
     grid.background = Background::Grid;
+    grid.paper = Color::rgb(0x2a, 0x2f, 0x38);
+    let ink = Color::rgb(0xf2, 0xf2, 0xf2);
+    let blue = Color::rgb(0x6c, 0xb4, 0xff);
     for k in 0..6 {
         grid.elements.push(wave(
             80.0,

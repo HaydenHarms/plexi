@@ -58,6 +58,11 @@ impl Color {
         self.0[3]
     }
 
+    /// Perceived brightness in 0..=1, ignoring alpha.
+    pub fn luminance(self) -> f32 {
+        (0.299 * self.0[0] as f32 + 0.587 * self.0[1] as f32 + 0.114 * self.0[2] as f32) / 255.0
+    }
+
     pub fn alpha_f32(self) -> f32 {
         self.0[3] as f32 / 255.0
     }
@@ -204,6 +209,9 @@ pub struct ImageEl {
     pub asset: String,
     pub pos: [f32; 2],
     pub size: [f32; 2],
+    /// Locked images can't be selected, moved or resized until unlocked (right-click).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -266,6 +274,10 @@ impl Element {
             Element::Image(i) => i.id,
             Element::Shape(s) => s.id,
         }
+    }
+
+    pub fn locked(&self) -> bool {
+        matches!(self, Element::Image(i) if i.locked)
     }
 
     /// Give the element a fresh id (after its geometry changed).
@@ -356,8 +368,26 @@ impl Background {
 
 /// Spacing of background rules and grid, in page units.
 pub const RULE_SPACING: f32 = 32.0;
-/// Color of background rules, grid and dots.
+/// Color of background rules, grid and dots on light paper.
 pub const RULE_COLOR: Color = Color::rgba(120, 140, 170, 90);
+
+/// Rule color that stays visible on `paper`: the usual blue-gray on light paper, a pale
+/// one on dark paper.
+pub fn rule_color(paper: Color) -> Color {
+    if paper.a() > 0 && paper.luminance() < 0.45 { Color::rgba(205, 215, 235, 56) } else { RULE_COLOR }
+}
+
+/// Paper colors offered in the page menu.
+pub const PAPER_COLORS: [(&str, Color); 8] = [
+    ("White", Color::WHITE),
+    ("Cream", Color::rgb(0xfb, 0xf5, 0xe6)),
+    ("Gray", Color::rgb(0xee, 0xf0, 0xf3)),
+    ("Mint", Color::rgb(0xe8, 0xf6, 0xee)),
+    ("Sky", Color::rgb(0xe7, 0xf0, 0xfb)),
+    ("Blush", Color::rgb(0xfb, 0xec, 0xee)),
+    ("Slate", Color::rgb(0x2a, 0x2f, 0x38)),
+    ("Black", Color::rgb(0x12, 0x13, 0x16)),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PageSize {
@@ -452,7 +482,7 @@ impl Document {
         Self {
             version: FORMAT_VERSION,
             title: title.into(),
-            pages: vec![Page::new("Page 1", PageSize::Letter)],
+            pages: vec![Page::new("Page 1", PageSize::Infinite)],
             overlay: Page::overlay(1920.0, 1080.0),
             assets: BTreeMap::new(),
         }

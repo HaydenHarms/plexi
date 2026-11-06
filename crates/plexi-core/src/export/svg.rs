@@ -4,6 +4,7 @@ use std::fmt::Write;
 
 use base64::Engine;
 
+use super::layout::Frame;
 use super::{Assets, RenderOptions};
 use crate::geom::Rect;
 use crate::ink::{PenPiece, pen_pieces};
@@ -272,7 +273,7 @@ pub(crate) fn background_svg(out: &mut String, page: &Page, b: Rect) {
     if marks.is_empty() {
         return;
     }
-    let c = RULE_COLOR;
+    let c = rule_color(page.paper);
     let mut lines = String::new();
     let mut dots = String::new();
     for m in marks {
@@ -301,21 +302,31 @@ pub(crate) fn background_svg(out: &mut String, page: &Page, b: Rect) {
     }
 }
 
-/// A standalone SVG document for one page, sized in CSS pixels (= page units).
+/// A standalone SVG document for the first output page of `page` (the whole page with
+/// the default layout), sized in CSS pixels (= page units).
 pub fn page_svg(page: &Page, assets: &Assets, opts: &RenderOptions) -> String {
-    page_svg_in(page, assets, opts, page.export_bounds())
+    let frame = opts.frames(page).into_iter().next().unwrap_or_else(|| Frame::exact(page.export_bounds()));
+    frame_svg(page, assets, opts, &frame)
 }
 
-/// Like [`page_svg`] but covering an explicit area of the page.
+/// An SVG document covering exactly `b` of the page at 1:1.
 pub fn page_svg_in(page: &Page, assets: &Assets, opts: &RenderOptions, b: Rect) -> String {
+    frame_svg(page, assets, opts, &Frame::exact(b))
+}
+
+/// An SVG document for one output page: `frame.view` of the page, `frame.size` big.
+pub fn frame_svg(page: &Page, assets: &Assets, opts: &RenderOptions, frame: &Frame) -> String {
+    let b = frame.view;
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"{w}\" height=\"{h}\" viewBox=\"{} {} {w} {h}\">",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"{}\" height=\"{}\" viewBox=\"{} {} {} {}\">",
+        n(frame.size[0]),
+        n(frame.size[1]),
         n(b.min[0]),
         n(b.min[1]),
-        w = n(b.width()),
-        h = n(b.height()),
+        n(b.width()),
+        n(b.height()),
     );
     let _ = writeln!(out, "<title>{}</title>", esc(&page.name));
     if opts.background {

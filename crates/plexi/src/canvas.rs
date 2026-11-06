@@ -15,9 +15,9 @@ use egui::{
 use plexi_core::export::svg::{Mark, background_marks};
 use plexi_core::geom::{dist, dist_to_segment, point_in_polygon};
 use plexi_core::ink::{self, StrokeBuilder};
-use plexi_core::{Color, Element, InkKind, Page, RULE_COLOR, RULE_SPACING, Shape, ShapeKind, Stroke, TextBox, new_id};
+use plexi_core::{Color, Element, InkKind, Page, RULE_SPACING, Shape, ShapeKind, Stroke, TextBox, new_id, rule_color};
 
-use crate::app::{Mode, PlexiApp, Tool};
+use crate::app::{ContextMenu, Mode, PlexiApp, Tool};
 use crate::history::Target;
 
 /// Maps page units to screen points: `screen = origin + offset + page * zoom`.
@@ -78,7 +78,27 @@ pub enum Interaction {
     },
     /// Text tool pressed here; the box opens on release.
     TextAt([f32; 2]),
+    /// Right button down: it becomes an erase once it moves, the context menu if not.
+    RightPress {
+        start: Pos2,
+    },
+    /// Dragging a corner of the selected image. `anchor` is the opposite corner, `dir`
+    /// the direction from it to the dragged one, `orig` the size when the drag began.
+    Resize {
+        id: u64,
+        anchor: [f32; 2],
+        dir: [f32; 2],
+        orig: [f32; 2],
+        changed: bool,
+    },
 }
+
+/// A grabbed image corner: (image id, opposite corner, direction to the grabbed corner,
+/// image size).
+type Handle = (u64, [f32; 2], [f32; 2], [f32; 2]);
+
+/// Screen distance within which a resize handle catches the pointer.
+const HANDLE_REACH: f32 = 10.0;
 
 /// Tessellated strokes, keyed by element id. Meshes are rebuilt when the zoom moves to
 /// a different half-octave so curves stay smooth without re-tessellating every frame.
@@ -184,6 +204,8 @@ pub struct PaintInput<'a> {
     pub skip: Option<u64>,
     pub moving: Option<(&'a HashSet<u64>, [f32; 2])>,
     pub canvas_bg: Color32,
+    /// Sheet outlines to draw on an infinite page.
+    pub sheets: &'a [plexi_core::Rect],
 }
 
 pub fn paint_shape(painter: &egui::Painter, s: &Shape, view: View, origin: Pos2, delta: [f32; 2]) {
@@ -251,7 +273,7 @@ pub fn paint_page(
             let a = view.to_page(origin, paper_area.min);
             let b = view.to_page(origin, paper_area.max);
             let area = plexi_core::Rect { min: a, max: b };
-            let rule = EStroke::new(1.0, color32(RULE_COLOR));
+            let rule = EStroke::new(1.0, color32(rule_color(page.paper)));
             for m in background_marks(page.background, area) {
                 match m {
                     Mark::HLine { y, x0, x1 } => {
@@ -264,6 +286,29 @@ pub fn paint_page(
                         painter.circle_filled(view.to_screen(origin, [x, y]), (1.5 * view.zoom).max(0.8), rule.color);
                     }
                 }
+            }
+        }
+    }
+
+    if !input.sheets.is_empty() {
+        let c = rule_color(page.paper);
+        let edge = EStroke::new(1.0, color32(c.with_alpha((c.a() as u32 * 2).min(255) as u8)));
+        let label = color32(c.with_alpha((c.a() as u32 * 3).min(255) as u8));
+        for (i, s) in input.sheets.iter().enumerate() {
+            let r = view.rect_to_screen(origin, *s);
+            if !r.intersects(clip) {
+                continue;
+            }
+            let c = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+            painter.extend(EShape::dashed_line(&c, edge, 7.0, 5.0));
+            if r.width() > 120.0 {
+                painter.text(
+                    r.right_top() + vec2(-8.0, 6.0),
+                    Align2::RIGHT_TOP,
+                    format!("{}", i + 1),
+                    FontId::proportional(11.0),
+                    label,
+                );
             }
         }
     }
@@ -344,7 +389,12 @@ impl PlexiApp {
             None => {
                 let c = page.content_bounds().filter(|b| !b.is_empty());
                 self.view = match c {
-                    Some(b) => View { zoom: 1.0, offset: vec2(rect.width() / 2.0 - b.center()[0], 96.0 - b.min[1]) },
+                    Some(b) => {
+                        // Fit the drawing's width (never enlarging); long notes scroll down.
+                        let zoom = ((rect.width() - 96.0) / b.width().max(1.0)).clamp(0.25, 1.0);
+                        let x = rect.width() / 2.0 - b.center()[0] * zoom;
+                        View { zoom, offset: vec2(x, 96.0 - b.min[1] * zoom) }
+                    }
                     None => View { zoom: 1.0, offset: vec2(48.0, 72.0) },
                 };
             }
@@ -398,6 +448,73 @@ impl PlexiApp {
         })
     }
 
+    /// Topmost element under `p` (within `r` page units of ink and outlines).
+    pub fn hit_element(&self, t: Target, p: [f32; 2], r: f32, include_locked: bool) -> Option<u64> {
+        self.page_ref(t).elements.iter().rev().find_map(|e| {
+            let hit = match e {
+                Element::Stroke(s) => ink::stroke_hit(s, p, r),
+                Element::Shape(s) => shape_hit(s, p, r),
+                Element::Text(tb) => tb.approx_bounds().expand(4.0).contains(p),
+                Element::Image(i) => {
+                    plexi_core::Rect::from_min_size(i.pos, i.size).contains(p) && (include_locked || !i.locked)
+                }
+            };
+            hit.then(|| e.id())
+        })
+    }
+
+    /// The single selected, unlocked image, if that is what is selected.
+    pub fn selected_image(&self, t: Target) -> Option<plexi_core::ImageEl> {
+        if self.selection.len() != 1 {
+            return None;
+        }
+        self.page_ref(t).elements.iter().find_map(|e| match e {
+            Element::Image(i) if self.selection.contains(&i.id) && !i.locked => Some(i.clone()),
+            _ => None,
+        })
+    }
+
+    /// The resize handle of the selected image under screen point `pos`.
+    fn handle_at(&self, t: Target, view: View, origin: Pos2, pos: Pos2) -> Option<Handle> {
+        let img = self.selected_image(t)?;
+        let [x0, y0] = img.pos;
+        let [x1, y1] = [x0 + img.size[0], y0 + img.size[1]];
+        [
+            ([x0, y0], [x1, y1], [-1.0, -1.0]),
+            ([x1, y0], [x0, y1], [1.0, -1.0]),
+            ([x1, y1], [x0, y0], [1.0, 1.0]),
+            ([x0, y1], [x1, y0], [-1.0, 1.0]),
+        ]
+        .into_iter()
+        .find(|(corner, _, _)| view.to_screen(origin, *corner).distance(pos) <= HANDLE_REACH)
+        .map(|(_, anchor, dir)| (img.id, anchor, dir, img.size))
+    }
+
+    /// Erase along the segment `from`-`to`; returns whether anything changed.
+    fn erase_along(&mut self, t: Target, from: [f32; 2], to: [f32; 2], r: f32) -> bool {
+        let steps = (dist(from, to) / (r * 0.5).max(0.5)).ceil().max(1.0) as usize;
+        let mut changed = false;
+        for k in 1..=steps {
+            let f = k as f32 / steps as f32;
+            let q = [from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f];
+            changed |= self.erase_at(t, q, r);
+        }
+        changed
+    }
+
+    /// Open the right-click menu for whatever is under screen point `pos`.
+    fn open_context_menu(&mut self, t: Target, view: View, origin: Pos2, pos: Pos2) {
+        let p = view.to_page(origin, pos);
+        let hit = self.hit_element(t, p, 6.0 / view.zoom, true);
+        if let Some(id) = hit
+            && !self.selection.contains(&id)
+        {
+            let locked = self.page_ref(t).elements.iter().any(|e| e.id() == id && e.locked());
+            self.selection = if locked { HashSet::new() } else { [id].into() };
+        }
+        self.context_menu = Some(ContextMenu { pos, target: t, hit });
+    }
+
     /// Erase around `p`; returns whether anything changed.
     fn erase_at(&mut self, t: Target, p: [f32; 2], r: f32) -> bool {
         let partial = self.config.eraser_partial;
@@ -439,7 +556,10 @@ impl PlexiApp {
         }
         let tool = match button {
             PointerButton::Primary => self.tool,
-            PointerButton::Secondary => Tool::Eraser,
+            PointerButton::Secondary => {
+                self.interaction = Interaction::RightPress { start: pos };
+                return;
+            }
             _ => return,
         };
         self.last_sample_time = now;
@@ -461,8 +581,17 @@ impl PlexiApp {
                 self.interaction = Interaction::Erase { last: p, changed };
             }
             Tool::Lasso => {
+                if let Some((id, anchor, dir, orig)) = self.handle_at(t, view, origin, pos) {
+                    self.pending_snapshot = Some(self.snapshot_of(t));
+                    self.interaction = Interaction::Resize { id, anchor, dir, orig, changed: false };
+                    return;
+                }
                 let inside = self.selection_bounds(t).is_some_and(|b| b.expand(6.0 / view.zoom).contains(p));
                 if inside {
+                    self.interaction = Interaction::Move { start: p, delta: [0.0, 0.0] };
+                } else if let Some(id) = self.hit_element(t, p, 4.0 / view.zoom, false) {
+                    // Press on something unselected: pick it up and drag it right away.
+                    self.selection = [id].into();
                     self.interaction = Interaction::Move { start: p, delta: [0.0, 0.0] };
                 } else {
                     self.selection.clear();
@@ -499,21 +628,49 @@ impl PlexiApp {
         }
     }
 
-    fn drag(&mut self, t: Target, view: View, origin: Pos2, pos: Pos2, time: f64) {
+    #[allow(clippy::too_many_arguments)]
+    fn drag(&mut self, t: Target, view: View, origin: Pos2, pos: Pos2, time: f64, shift: bool) {
         let p = view.to_page(origin, pos);
         let mut inter = std::mem::replace(&mut self.interaction, Interaction::Idle);
         match &mut inter {
             Interaction::Idle => {}
             Interaction::Ink(b) => b.push(time, p, self.pressure()),
+            Interaction::RightPress { start } => {
+                if start.distance(pos) > 4.0 {
+                    // It's a drag: erase from where the button went down.
+                    self.pending_snapshot = Some(self.snapshot_of(t));
+                    let r = self.config.eraser_size / 2.0 / view.zoom;
+                    let from = view.to_page(origin, *start);
+                    let changed = self.erase_at(t, from, r) | self.erase_along(t, from, p, r);
+                    inter = Interaction::Erase { last: p, changed };
+                }
+            }
             Interaction::Erase { last, changed } => {
                 let r = self.config.eraser_size / 2.0 / view.zoom;
-                let steps = (dist(*last, p) / (r * 0.5).max(0.5)).ceil().max(1.0) as usize;
-                for k in 1..=steps {
-                    let f = k as f32 / steps as f32;
-                    let q = [last[0] + (p[0] - last[0]) * f, last[1] + (p[1] - last[1]) * f];
-                    *changed |= self.erase_at(t, q, r);
-                }
+                *changed |= self.erase_along(t, *last, p, r);
                 *last = p;
+            }
+            Interaction::Resize { id, anchor, dir, orig, changed } => {
+                let min = 8.0 / view.zoom;
+                let w = ((p[0] - anchor[0]) * dir[0]).max(min);
+                let h = ((p[1] - anchor[1]) * dir[1]).max(min);
+                // Keep the picture's proportions unless Shift is held.
+                let (w, h) = if shift {
+                    (w, h)
+                } else {
+                    let s = (w / orig[0].max(1e-3)).max(h / orig[1].max(1e-3));
+                    (orig[0] * s, orig[1] * s)
+                };
+                let pos = [
+                    if dir[0] > 0.0 { anchor[0] } else { anchor[0] - w },
+                    if dir[1] > 0.0 { anchor[1] } else { anchor[1] - h },
+                ];
+                let id = *id;
+                if let Some(Element::Image(img)) = self.page_mut(t).elements.iter_mut().find(|e| e.id() == id) {
+                    img.pos = pos;
+                    img.size = [w, h];
+                    *changed = true;
+                }
             }
             Interaction::Lasso(pts) => {
                 if pts.last().is_none_or(|l| dist(*l, p) > 2.0 / view.zoom) {
@@ -535,6 +692,19 @@ impl PlexiApp {
         match std::mem::replace(&mut self.interaction, Interaction::Idle) {
             Interaction::Idle | Interaction::Pan { .. } => {}
             Interaction::TextAt(p) => self.open_text_at(t, p),
+            Interaction::RightPress { start } => self.open_context_menu(t, view, self.canvas_origin, start),
+            Interaction::Resize { id, changed, .. } => {
+                let snapshot = self.pending_snapshot.take();
+                if changed && let Some(s) = snapshot {
+                    self.history.push(s);
+                    self.touch();
+                    let page = self.page_mut(t);
+                    if let Some(i) = page.find(id) {
+                        page.elements[i].renew_id();
+                        self.selection = [page.elements[i].id()].into();
+                    }
+                }
+            }
             Interaction::Ink(b) => {
                 let s = b.finish();
                 if !s.points.is_empty() {
@@ -552,12 +722,19 @@ impl PlexiApp {
             }
             Interaction::Lasso(pts) => {
                 if pts.len() < 3 {
+                    // A click on empty space, or on a locked image.
+                    if let Some(p) = pts.first()
+                        && self.hit_element(t, *p, 4.0 / view.zoom, true).is_some()
+                    {
+                        self.toast("That image is locked — right-click it to unlock");
+                    }
                     return;
                 }
                 let sel: HashSet<u64> = self
                     .page_ref(t)
                     .elements
                     .iter()
+                    .filter(|e| !e.locked())
                     .filter(|e| match e {
                         Element::Stroke(s) => {
                             let inside = s.points.iter().filter(|q| point_in_polygon(q.pos(), &pts)).count();
@@ -606,6 +783,7 @@ impl PlexiApp {
         let layer = ui.layer_id();
         let view = self.view_for(t);
         let origin = rect.min;
+        self.canvas_origin = origin;
         let on_canvas = |pos: Pos2| rect.contains(pos) && ctx.layer_id_at(pos).is_none_or(|l| l == layer);
         let (events, now, mods, space) = ui.input(|i| (i.events.clone(), i.time, i.modifiers, i.key_down(Key::Space)));
         let moves = events.iter().filter(|e| matches!(e, Event::PointerMoved(_))).count().max(1);
@@ -621,14 +799,19 @@ impl PlexiApp {
                     }
                 }
                 Event::PointerButton { pos, button, pressed: true, .. } => {
-                    if matches!(self.interaction, Interaction::Idle) && on_canvas(pos) {
+                    if self.context_menu.is_some() {
+                        // The press that dismisses the menu doesn't draw.
+                        if on_canvas(pos) {
+                            self.context_menu = None;
+                        }
+                    } else if matches!(self.interaction, Interaction::Idle) && on_canvas(pos) {
                         self.begin(t, view, origin, pos, button, space, now);
                     }
                 }
                 Event::PointerMoved(pos) => {
                     k += 1;
                     let time = t0 + (now - t0) * k as f64 / moves as f64;
-                    self.drag(t, view, origin, pos, time);
+                    self.drag(t, view, origin, pos, time, mods.shift);
                 }
                 Event::PointerButton { pressed: false, .. } => {
                     self.end(t, view, mods.shift);
@@ -675,8 +858,20 @@ impl PlexiApp {
             Tool::Text => ui.ctx().set_cursor_icon(CursorIcon::Text),
             Tool::Lasso => {
                 let p = view.to_page(rect.min, pos);
-                let over = self.selection_bounds(t).is_some_and(|b| b.expand(6.0 / view.zoom).contains(p));
-                ui.ctx().set_cursor_icon(if over { CursorIcon::Move } else { CursorIcon::Crosshair });
+                let handle = match &self.interaction {
+                    Interaction::Resize { dir, .. } => Some(*dir),
+                    _ => self.handle_at(t, view, rect.min, pos).map(|h| h.2),
+                };
+                let icon = if let Some(d) = handle {
+                    if d[0] * d[1] > 0.0 { CursorIcon::ResizeNwSe } else { CursorIcon::ResizeNeSw }
+                } else if self.selection_bounds(t).is_some_and(|b| b.expand(6.0 / view.zoom).contains(p))
+                    || self.hit_element(t, p, 4.0 / view.zoom, false).is_some()
+                {
+                    CursorIcon::Move
+                } else {
+                    CursorIcon::Crosshair
+                };
+                ui.ctx().set_cursor_icon(icon);
             }
             Tool::Shape(_) => ui.ctx().set_cursor_icon(CursorIcon::Crosshair),
             Tool::Eraser => {}
@@ -699,6 +894,7 @@ impl PlexiApp {
             _ => None,
         };
         let skip = self.editing_text.filter(|(et, _)| *et == t).map(|(_, id)| id);
+        let sheets = self.sheets_for(t);
         {
             let input = PaintInput {
                 page: match t {
@@ -713,12 +909,33 @@ impl PlexiApp {
                 skip,
                 moving: moving.map(|d| (&self.selection, d)),
                 canvas_bg,
+                sheets: &sheets,
             };
             paint_page(ui, &input, &mut self.cache, &mut self.textures);
         }
         self.paint_live(ui, rect, t);
         self.cursor(ui, rect, t);
         self.text_editor(ui, t);
+    }
+
+    /// Outlines of the sheets in use on an infinite page, cached per document revision.
+    fn sheets_for(&mut self, t: Target) -> Vec<plexi_core::Rect> {
+        let Target::Page(i) = t else { return Vec::new() };
+        let i = i.min(self.doc.pages.len() - 1);
+        if !self.config.sheet_guides || self.doc.pages[i].size.dims().is_some() {
+            return Vec::new();
+        }
+        let size = self.config.sheet_size();
+        if let Some((rev, page, s, tiles)) = &self.sheet_cache
+            && *rev == self.revision
+            && *page == i
+            && *s == size
+        {
+            return tiles.clone();
+        }
+        let tiles = plexi_core::export::layout::used_tiles(&self.doc.pages[i], size);
+        self.sheet_cache = Some((self.revision, i, size, tiles.clone()));
+        tiles
     }
 
     fn paint_live(&mut self, ui: &Ui, rect: Rect, t: Target) {
@@ -760,6 +977,23 @@ impl PlexiApp {
             painter.rect_filled(r, 4.0, accent.gamma_multiply(0.06));
             let c = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
             painter.extend(EShape::dashed_line(&c, EStroke::new(1.5, accent), 6.0, 4.0));
+        }
+        // Corner handles for resizing a single selected image.
+        if let Some(img) = self.selected_image(t) {
+            let d = match &self.interaction {
+                Interaction::Move { delta, .. } => *delta,
+                _ => [0.0, 0.0],
+            };
+            let r = view.rect_to_screen(
+                origin,
+                plexi_core::Rect::from_min_size([img.pos[0] + d[0], img.pos[1] + d[1]], img.size),
+            );
+            painter.rect_stroke(r, 0.0, EStroke::new(1.0, accent), StrokeKind::Outside);
+            for c in [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()] {
+                let h = Rect::from_center_size(c, vec2(9.0, 9.0));
+                painter.rect_filled(h, 2.0, Color32::WHITE);
+                painter.rect_stroke(h, 2.0, EStroke::new(1.5, accent), StrokeKind::Inside);
+            }
         }
     }
 

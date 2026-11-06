@@ -12,12 +12,16 @@ screen into a sheet of glass you draw on. Written in Rust.
 - **A pen that feels like a pen.** Pressure-sensitive ink drawn exactly where the pen
   goes, with light, adjustable smoothing that steadies slow strokes without rounding off
   fast writing.
+- **An endless page.** Notes start on an infinite canvas in any paper color. Draw past
+  the edge of a sheet and the next sheet's outline appears there; PDF export prints one
+  sheet per outline, or shrinks everything onto one.
 - **Almost no UI.** One floating toolbar. Everything else is a shortcut or
   <kbd>Ctrl</kbd>+<kbd>K</kbd> away.
 - **Opens in a blink, saves on its own.** A single small exe; notes autosave and reopen
   where you left off.
 - **Exports to everything:** PDF (vector, multi-page), PNG, JPEG, WebP, BMP, TIFF, SVG,
-  HTML, Markdown with images, plain text, Excalidraw, draw.io, InkML and JSON.
+  HTML, Markdown with images, plain text, Excalidraw, draw.io, InkML and JSON, with a live
+  preview and your choice of paper size, orientation, margins and pixel size.
 
 <p align="center"><img src="docs/export-sample.png" width="420" alt="A page of handwritten notes exported from Plexi"></p>
 
@@ -48,7 +52,9 @@ Builds are not code-signed yet, so SmartScreen may warn the first time
 | Line, arrow, rectangle, ellipse | <kbd>L</kbd> <kbd>A</kbd> <kbd>R</kbd> <kbd>O</kbd> (hold <kbd>Shift</kbd> to snap) |
 | Colors, width | <kbd>1</kbd>–<kbd>9</kbd>, <kbd>[</kbd> <kbd>]</kbd> |
 | Pan, zoom | scroll, <kbd>Space</kbd>+drag, two fingers · <kbd>Ctrl</kbd>+scroll, pinch |
-| Pages | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> new, <kbd>PgDn</kbd> / <kbd>PgUp</kbd> |
+| Pages | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> new, <kbd>PgDn</kbd> / <kbd>PgUp</kbd>, trash button to delete (undoable) |
+| Images | paste or drop; drag a corner to resize (<kbd>Shift</kbd>: free) |
+| Lock an image, arrange, paper color | right-click |
 | Everything else | <kbd>Ctrl</kbd>+<kbd>K</kbd> command palette, <kbd>F1</kbd> shortcuts |
 
 Paste or drop images straight onto a page. The tray icon (left-click) toggles drawing on
@@ -61,6 +67,7 @@ plexi [notes.plexi]          open a notebook
 plexi --draw                 start drawing on screen
 plexi --background           start hidden, waiting for the hotkey
 plexi export notes.plexi notes.pdf [--page N | --all | --screen] [--scale 2] [--no-background]
+                                   [--paper letter [--landscape] [--tile]] [--trim] [--margin 0.5]
 ```
 
 ## The `.plexi` file

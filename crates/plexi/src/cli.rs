@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use plexi_core::export::layout::{Area, PAPERS};
 use plexi_core::export::{ExportFormat, RenderOptions, export};
 use plexi_core::{Page, format};
 
@@ -14,10 +15,15 @@ Usage:
   plexi --draw                 Start straight in draw-on-screen mode
   plexi --background           Start hidden; press the draw hotkey to begin
   plexi export IN.plexi OUT [--page N | --all | --screen] [--scale S] [--no-background]
+                           [--paper NAME [--landscape] [--tile]] [--trim] [--margin INCHES]
 
 OUT's extension picks the format: pdf png jpg webp bmp tiff svg html md txt
 excalidraw drawio inkml json. Raster and SVG exports of several pages write
-OUT-1.ext, OUT-2.ext, …";
+OUT-1.ext, OUT-2.ext, …
+
+--paper puts each page on a sheet (letter, a4, legal, tabloid, a5, a3, slide),
+shrunk to fit; with --tile it is split across sheets at full size instead.
+--trim exports only the drawn area.";
 
 pub fn is_cli(args: &[String]) -> bool {
     matches!(args.first().map(String::as_str), Some("export" | "--help" | "-h" | "help" | "--version" | "-V"))
@@ -54,12 +60,25 @@ fn export_cmd(args: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut all = false;
     let mut screen = false;
     let mut opts = RenderOptions::default();
+    let mut landscape = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--all" => all = true,
             "--screen" => screen = true,
             "--no-background" => opts.background = false,
+            "--tile" => opts.layout.tile = true,
+            "--trim" => opts.layout.area = Area::Content,
+            "--landscape" => landscape = true,
+            "--paper" => {
+                let name = it.next().ok_or("--paper needs a name")?.to_ascii_lowercase();
+                let found = PAPERS.iter().find(|(n, _)| n.to_ascii_lowercase().starts_with(&name));
+                opts.layout.sheet = Some(found.ok_or_else(|| format!("unknown paper {name}"))?.1);
+            }
+            "--margin" => {
+                let m: f32 = it.next().and_then(|v| v.parse().ok()).ok_or("--margin needs inches")?;
+                opts.layout.margin = m * 96.0;
+            }
             "--page" => {
                 let n: usize = it.next().and_then(|v| v.parse().ok()).ok_or("--page needs a number")?;
                 page = Some(n.max(1) - 1);
@@ -70,6 +89,9 @@ fn export_cmd(args: &[String]) -> Result<Vec<PathBuf>, String> {
         }
     }
     let [input, output] = positional.as_slice() else { return Err(USAGE.into()) };
+    if landscape && let Some([w, h]) = opts.layout.sheet {
+        opts.layout.sheet = Some([h, w]);
+    }
     let doc = format::load(input).map_err(|e| format!("{}: {e}", input.display()))?;
     let ext = output.extension().and_then(|e| e.to_str()).unwrap_or("");
     let fmt = ExportFormat::from_extension(ext).ok_or_else(|| format!("don't know how to export .{ext}"))?;

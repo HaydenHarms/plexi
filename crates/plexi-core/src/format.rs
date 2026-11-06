@@ -148,7 +148,13 @@ mod tests {
             size: 20.0,
             color: Color::BLACK,
         }));
-        p.elements.push(Element::Image(ImageEl { id: new_id(), asset, pos: [0.0, 0.0], size: [10.0, 10.0] }));
+        p.elements.push(Element::Image(ImageEl {
+            id: new_id(),
+            asset,
+            pos: [0.0, 0.0],
+            size: [10.0, 10.0],
+            locked: true,
+        }));
         d.overlay.elements.push(Element::Shape(Shape {
             id: new_id(),
             kind: ShapeKind::Arrow,

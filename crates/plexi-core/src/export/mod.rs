@@ -3,6 +3,7 @@
 //! svg2pdf, so every format shows the same thing.
 
 pub mod interop;
+pub mod layout;
 pub mod pdf;
 pub mod raster;
 pub mod svg;
@@ -40,11 +41,20 @@ pub struct RenderOptions {
     pub background: bool,
     /// Include text boxes. Off is used when text is exported separately (draw.io).
     pub text: bool,
+    /// Which part of the page goes on which sheets.
+    pub layout: layout::Layout,
 }
 
 impl Default for RenderOptions {
     fn default() -> Self {
-        Self { scale: 2.0, background: true, text: true }
+        Self { scale: 2.0, background: true, text: true, layout: layout::Layout::default() }
+    }
+}
+
+impl RenderOptions {
+    /// The output pages `page` becomes under these options.
+    pub fn frames(&self, page: &Page) -> Vec<layout::Frame> {
+        layout::frames(page, &self.layout)
     }
 }
 
@@ -165,12 +175,14 @@ pub fn export(
     }
     let assets = &doc.assets;
     if format.one_page_per_file() {
+        let outputs: Vec<(&Page, layout::Frame)> =
+            pages.iter().flat_map(|p| opts.frames(p).into_iter().map(move |f| (*p, f))).collect();
         let mut written = Vec::new();
-        for (i, page) in pages.iter().enumerate() {
-            let target = if pages.len() == 1 { path.to_path_buf() } else { numbered(path, i + 1) };
+        for (i, (page, frame)) in outputs.iter().enumerate() {
+            let target = if outputs.len() == 1 { path.to_path_buf() } else { numbered(path, i + 1) };
             let bytes = match format {
-                ExportFormat::Svg => svg::page_svg(page, assets, opts).into_bytes(),
-                f => raster::page_bytes(page, assets, opts, f)?,
+                ExportFormat::Svg => svg::frame_svg(page, assets, opts, frame).into_bytes(),
+                f => raster::frame_bytes(page, assets, opts, frame, f)?,
             };
             std::fs::write(&target, bytes)?;
             written.push(target);
@@ -254,7 +266,13 @@ mod tests {
             size: 24.0,
             color: Color::BLACK,
         }));
-        p.elements.push(Element::Image(ImageEl { id: new_id(), asset, pos: [500.0, 500.0], size: [40.0, 40.0] }));
+        p.elements.push(Element::Image(ImageEl {
+            id: new_id(),
+            asset,
+            pos: [500.0, 500.0],
+            size: [40.0, 40.0],
+            locked: false,
+        }));
         for kind in [ShapeKind::Line, ShapeKind::Arrow, ShapeKind::Rect, ShapeKind::Ellipse] {
             p.elements.push(Element::Shape(Shape {
                 id: new_id(),

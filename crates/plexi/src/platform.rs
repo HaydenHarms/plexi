@@ -22,8 +22,8 @@ mod imp {
     };
     use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetWindowRect, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetForegroundWindow,
-        SetWindowDisplayAffinity, SetWindowPos, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+        GetCursorPos, GetWindowRect, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW,
+        SetForegroundWindow, SetWindowDisplayAffinity, SetWindowPos, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
     };
 
     fn hwnd(h: isize) -> HWND {
@@ -54,6 +54,24 @@ mod imp {
         let mut r = RECT::default();
         unsafe { GetWindowRect(hwnd(h), &mut r) }.ok()?;
         Some(PxRect { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top })
+    }
+
+    /// Pull a window that hangs off its monitor's work area (e.g. under the taskbar)
+    /// back inside it, shrinking it if it is bigger than the work area.
+    pub fn fit_to_work_area(h: isize) {
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let m = unsafe { MonitorFromWindow(hwnd(h), MONITOR_DEFAULTTONEAREST) };
+        if !unsafe { GetMonitorInfoW(m, &mut info) }.as_bool() {
+            return;
+        }
+        let (work, Some(r)) = (info.rcWork, window_rect(h)) else { return };
+        let (ww, wh) = (work.right - work.left, work.bottom - work.top);
+        let (w, hh) = (r.w.min(ww), r.h.min(wh));
+        let x = r.x.clamp(work.left, work.right - w);
+        let y = r.y.clamp(work.top, work.bottom - hh);
+        if (x, y, w, hh) != (r.x, r.y, r.w, r.h) {
+            let _ = unsafe { SetWindowPos(hwnd(h), None, x, y, w, hh, SWP_NOACTIVATE | SWP_NOZORDER) };
+        }
     }
 
     /// Cover `r` exactly and stay above other windows.
@@ -153,6 +171,7 @@ mod imp {
     }
     pub fn place_topmost(_: isize, _: PxRect, _: bool) {}
     pub fn place_normal(_: isize, _: PxRect) {}
+    pub fn fit_to_work_area(_: isize) {}
     pub fn focus(_: isize) {}
     pub fn exclude_from_capture(_: isize, _: bool) {}
     pub fn capture(_: PxRect) -> Option<image::RgbaImage> {

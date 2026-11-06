@@ -4,6 +4,7 @@ use std::io::Cursor;
 
 use resvg::tiny_skia;
 
+use super::layout::Frame;
 use super::{Assets, ExportError, ExportFormat, RenderOptions, parse_svg, svg};
 use crate::geom::Rect;
 use crate::model::{Color, Page};
@@ -11,19 +12,30 @@ use crate::model::{Color, Page};
 /// Largest output side, to keep a stray scale factor from allocating gigabytes.
 pub const MAX_SIDE: u32 = 16384;
 
-/// Render a page to a straight-alpha RGBA image.
+/// Render the first output page of `page` to a straight-alpha RGBA image.
 pub fn page_rgba(page: &Page, assets: &Assets, opts: &RenderOptions) -> Result<image::RgbaImage, ExportError> {
-    area_rgba(page, assets, opts, page.export_bounds())
+    let frame = opts.frames(page).into_iter().next().unwrap_or_else(|| Frame::exact(page.export_bounds()));
+    frame_rgba(page, assets, opts, &frame)
 }
 
-/// Render an explicit area of a page.
+/// Render an explicit area of a page at 1:1 (times `opts.scale`).
 pub fn area_rgba(
     page: &Page,
     assets: &Assets,
     opts: &RenderOptions,
     area: Rect,
 ) -> Result<image::RgbaImage, ExportError> {
-    let doc = svg::page_svg_in(page, assets, opts, area);
+    frame_rgba(page, assets, opts, &Frame::exact(area))
+}
+
+/// Render one output page. The image is `frame.size * opts.scale` pixels.
+pub fn frame_rgba(
+    page: &Page,
+    assets: &Assets,
+    opts: &RenderOptions,
+    frame: &Frame,
+) -> Result<image::RgbaImage, ExportError> {
+    let doc = svg::frame_svg(page, assets, opts, frame);
     let tree = parse_svg(&doc)?;
     let size = tree.size();
     let mut scale = opts.scale.max(0.01);
@@ -80,7 +92,18 @@ pub fn page_bytes(
     opts: &RenderOptions,
     format: ExportFormat,
 ) -> Result<Vec<u8>, ExportError> {
-    let img = page_rgba(page, assets, opts)?;
+    let frame = opts.frames(page).into_iter().next().unwrap_or_else(|| Frame::exact(page.export_bounds()));
+    frame_bytes(page, assets, opts, &frame, format)
+}
+
+pub fn frame_bytes(
+    page: &Page,
+    assets: &Assets,
+    opts: &RenderOptions,
+    frame: &Frame,
+    format: ExportFormat,
+) -> Result<Vec<u8>, ExportError> {
+    let img = frame_rgba(page, assets, opts, frame)?;
     let under = if page.paper.a() > 0 { page.paper.with_alpha(255) } else { Color::WHITE };
     encode(&img, format, under)
 }
