@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/plexi-core", "crates/plexi"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 license-file = "LICENSE"
 repository = "https://github.com/HaydenHarms/plexi"
