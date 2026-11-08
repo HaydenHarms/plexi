@@ -9,6 +9,7 @@ description = "Document model, ink geometry, file format and exporters for Plexi
 base64 = "0.23.1"
 epaint_default_fonts = "0.37"
 image = "0.25.10"
+kurbo = "0.13"
 lyon_tessellation = "1.0.23"
 pdf-writer = "0.12"
 resvg = "0.45"
@@ -16,4 +17,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 svg2pdf = "0.13.0"
 thiserror = "2.0.21"
+write-fonts = "0.48"
 zip = "9.4.0"
+
+[dev-dependencies]
+ttf-parser = "0.25"

@@ -4,4 +4,4 @@
 - [x] Play animated GIFs on the canvas
 - [x] Rectangle select tool (alongside the freeform lasso) to select an area, copy it and paste it elsewhere
 - [x] Hand tool: a neutral pointer for panning and grabbing, without having to pick the pen or the lasso
-- [ ] Handwriting font: a tab where you write samples with the pen, saved as your own font to type in
+- [x] Handwriting font: a tab where you write samples with the pen, saved as your own font to type in

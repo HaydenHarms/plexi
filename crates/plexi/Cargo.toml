@@ -30,3 +30,6 @@ windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Gd
 
 [build-dependencies]
 embed-resource = "3.0.12"
+
+[dev-dependencies]
+ttf-parser = "0.25"

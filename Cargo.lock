@@ -3797,6 +3797,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tray-icon",
+ "ttf-parser",
  "ureq",
  "windows 0.58.0",
  "xcap",
@@ -3809,6 +3810,7 @@ dependencies = [
  "base64 0.23.1",
  "epaint_default_fonts",
  "image",
+ "kurbo 0.13.1",
  "lyon_tessellation",
  "pdf-writer",
  "resvg",
@@ -3816,6 +3818,8 @@ dependencies = [
  "serde_json",
  "svg2pdf",
  "thiserror 2.0.21",
+ "ttf-parser",
+ "write-fonts",
  "zip",
 ]
 

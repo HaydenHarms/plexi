@@ -8,6 +8,7 @@ pub mod fonts;
 pub mod format;
 pub mod geom;
 pub mod gif;
+pub mod handwriting;
 pub mod ink;
 pub mod model;
 

@@ -29,15 +29,15 @@ pub fn install_style(ctx: &Context) {
     });
 }
 
-struct Theme {
-    canvas: Color32,
-    panel: Color32,
-    border: Color32,
-    ink: Color32,
-    hover: Color32,
+pub(crate) struct Theme {
+    pub canvas: Color32,
+    pub panel: Color32,
+    pub border: Color32,
+    pub ink: Color32,
+    pub hover: Color32,
 }
 
-fn theme(ui: &Ui) -> Theme {
+pub(crate) fn theme(ui: &Ui) -> Theme {
     if ui.visuals().dark_mode {
         Theme {
             canvas: Color32::from_rgb(0x1c, 0x1e, 0x23),
@@ -445,6 +445,11 @@ fn font_menu(app: &mut PlexiApp, ui: &mut Ui, current: Option<&str>) {
         app.apply_text_style(|t| t.font = f.clone());
         ui.close();
     }
+    ui.separator();
+    if ui.button("Write my handwriting…").clicked() {
+        app.handwriting.open = true;
+        ui.close();
+    }
 }
 
 fn color_and_width(app: &mut PlexiApp, ui: &mut Ui) {
@@ -768,6 +773,10 @@ fn file_menu(app: &mut PlexiApp, ui: &mut Ui) {
         ui.close();
         app.palette.open = true;
     }
+    if item(ui, "My handwriting font…", "").clicked() {
+        ui.close();
+        app.handwriting.open = true;
+    }
     if item(ui, "Settings", "Ctrl+,").clicked() {
         ui.close();
         app.settings_open = true;
@@ -981,6 +990,7 @@ enum Cmd {
     PasteSelection,
     PartialEraser,
     Settings,
+    Handwriting,
     CheckUpdates,
     Shortcuts,
     Quit,
@@ -1020,6 +1030,7 @@ fn commands(app: &PlexiApp) -> Vec<(Cmd, String, String)> {
             String::new(),
         ),
         (Cmd::Settings, "Settings".into(), "Ctrl+,".into()),
+        (Cmd::Handwriting, "My handwriting font…".into(), String::new()),
         (Cmd::CheckUpdates, "Check for updates".into(), String::new()),
         (Cmd::Shortcuts, "Keyboard shortcuts".into(), "F1".into()),
         (Cmd::Quit, "Quit Plexi".into(), String::new()),
@@ -1113,6 +1124,7 @@ fn run_cmd(app: &mut PlexiApp, ctx: &Context, cmd: Cmd) {
         Cmd::PasteSelection => app.paste_selection(ctx),
         Cmd::PartialEraser => app.config.eraser_partial = !app.config.eraser_partial,
         Cmd::Settings => app.settings_open = true,
+        Cmd::Handwriting => app.handwriting.open = true,
         Cmd::CheckUpdates => app.check_for_updates(ctx, true),
         Cmd::Shortcuts => app.help_open = true,
         Cmd::Quit => {
@@ -1909,6 +1921,7 @@ pub fn dialogs(app: &mut PlexiApp, ctx: &Context) {
     export_window(app, ctx);
     settings_window(app, ctx);
     help_window(app, ctx);
+    crate::handwriting::window(app, ctx);
     toast(app, ctx);
 }
 

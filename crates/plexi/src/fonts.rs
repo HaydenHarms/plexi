@@ -37,6 +37,20 @@ impl FontBook {
         self.ready.extend(self.pending.drain(..));
     }
 
+    /// Drop whatever this book knows about `family` (its face, its bold/italic styles,
+    /// the cached family list), so the next lookup re-reads it from
+    /// `plexi_core::fonts` instead of an egui font id it already resolved. Used after
+    /// the handwriting window saves a new font: `plexi_core::fonts::set_handwriting`
+    /// already swapped in the fresh bytes, but without this the editor would keep
+    /// showing whatever it loaded under the same family name before.
+    pub fn forget(&mut self, family: &str) {
+        let prefix = format!("{family}|");
+        self.tried.retain(|k, _| !k.starts_with(&prefix));
+        self.ready.retain(|k| !k.starts_with(&prefix));
+        self.styles.remove(family);
+        self.families = None;
+    }
+
     /// The egui family that draws `t`. Until its face is loaded (and for a font that
     /// isn't installed) this is the default font.
     pub fn family(&mut self, ctx: &Context, t: &TextBox) -> FontFamily {

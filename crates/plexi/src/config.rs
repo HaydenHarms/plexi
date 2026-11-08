@@ -34,6 +34,12 @@ pub fn scratch_path() -> PathBuf {
     data_dir().join("Untitled.plexi")
 }
 
+/// Where the handwriting window's samples are saved, as plain JSON (see
+/// `plexi_core::handwriting`).
+pub fn handwriting_path() -> PathBuf {
+    data_dir().join("handwriting.json")
+}
+
 const CONFIG_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

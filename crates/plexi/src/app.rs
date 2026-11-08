@@ -16,6 +16,7 @@ use plexi_core::{Color, Document, Element, ImageEl, InkKind, Page, ShapeKind, Te
 use crate::canvas::{AssetTexture, CropState, Interaction, MeshCache, View};
 use crate::config::{self, Config};
 use crate::fonts::FontBook;
+use crate::handwriting::HandwritingState;
 use crate::history::{History, Snapshot, Target};
 use crate::platform::{self, PxRect};
 use crate::shell::{Shell, ShellEvent};
@@ -272,6 +273,7 @@ pub struct PlexiApp {
     pub export: Option<ExportDialog>,
     pub settings_open: bool,
     pub help_open: bool,
+    pub handwriting: HandwritingState,
     pub toast: Option<Toast>,
     pub context_menu: Option<ContextMenu>,
     pub update: UpdateState,
@@ -302,6 +304,8 @@ impl PlexiApp {
         crate::ui::install_style(&cc.egui_ctx);
         let config = Config::load();
         FontBook::warm_up();
+        let handwriting = HandwritingState::default();
+        handwriting.install_saved_font();
         let (jobs_tx, jobs_rx) = channel();
         let mut app = Self {
             doc: Document::new("Untitled"),
@@ -337,6 +341,7 @@ impl PlexiApp {
             export: None,
             settings_open: false,
             help_open: false,
+            handwriting,
             toast: None,
             context_menu: None,
             update: UpdateState::Idle,
@@ -2809,5 +2814,30 @@ mod tests {
         let dlg = h.app.export.as_ref().unwrap();
         assert_eq!((dlg.preview.frame_count(), dlg.preview.total()), (1, 2));
         assert_eq!(dlg.pick(2), Ok(Some(vec![1])));
+    }
+
+    #[test]
+    fn handwriting_window_captures_a_stroke_and_builds_a_font() {
+        let mut h = Harness::new();
+        h.app.handwriting.open = true;
+        h.step(vec![]); // paint the window once so its boxes are recorded
+
+        let rect = *h.app.handwriting.boxes.get(&'A').expect("the 'A' box was painted");
+        h.drag(PointerButton::Primary, &line(rect.left() + 4.0, rect.right() - 4.0, rect.center().y));
+
+        let strokes = h.app.handwriting.samples.strokes('A');
+        assert_eq!(strokes.len(), 1, "one drag makes one stroke");
+        assert!(strokes[0].points.len() > 1);
+        // Points stay within (or very near) the box: normalized by its height, not its
+        // narrower width, so a round pen tip isn't stretched into an ellipse.
+        for p in &strokes[0].points {
+            assert!((-0.2..1.2).contains(&p.x) && (-0.2..1.2).contains(&p.y));
+        }
+        assert!(h.app.handwriting.samples.strokes('B').is_empty(), "untouched boxes stay empty");
+
+        let bytes = plexi_core::handwriting::build_font(&h.app.handwriting.samples);
+        let face = ttf_parser::Face::parse(&bytes, 0).expect("a valid font came out of a real capture");
+        assert!(face.glyph_index('A').is_some());
+        assert!(face.glyph_index('B').is_none(), "characters never written fall back to the default font");
     }
 }

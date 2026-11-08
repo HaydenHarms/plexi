@@ -18,6 +18,9 @@ screen into a sheet of glass you draw on. Written in Rust.
 - **Snip, crop, style.** Snip any area of the screen into your notes
   (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd>, anywhere), crop pictures, and set text
   in any installed font, size, bold, italic or underline.
+- **Type in your own handwriting.** Write a sample of each letter with the pen in the
+  handwriting window (from the font picker, the File menu, or <kbd>Ctrl</kbd>+<kbd>K</kbd>);
+  Plexi builds a real font from it that renders the same way in every export.
 - **Animated GIFs play right on the canvas**, cropping and all; exports show their first
   frame like a still picture.
 - **Almost no UI.** One floating toolbar. Everything else is a shortcut or

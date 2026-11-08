@@ -8,6 +8,7 @@ mod canvas;
 mod cli;
 mod config;
 mod fonts;
+mod handwriting;
 mod history;
 mod platform;
 #[cfg(test)]
