@@ -13,7 +13,7 @@ use plexi_core::export::layout::{self, Area, Layout};
 use plexi_core::export::{ExportFormat, RenderOptions};
 use plexi_core::{Color, Document, Element, ImageEl, InkKind, Page, ShapeKind, TextBox, format, new_id};
 
-use crate::canvas::{CropState, Interaction, MeshCache, View};
+use crate::canvas::{AssetTexture, CropState, Interaction, MeshCache, View};
 use crate::config::{self, Config};
 use crate::fonts::FontBook;
 use crate::history::{History, Snapshot, Target};
@@ -258,7 +258,7 @@ pub struct PlexiApp {
     pub pen_pressure: Option<f32>,
     pub last_sample_time: f64,
     pub cache: MeshCache,
-    pub textures: HashMap<String, egui::TextureHandle>,
+    pub textures: HashMap<String, AssetTexture>,
     pub fonts: FontBook,
     /// The text box being edited got a new font or style (a change even if the words
     /// stay the same).
@@ -921,8 +921,13 @@ impl PlexiApp {
             return;
         };
         let (w, h) = (img.width() as f32, img.height() as f32);
-        // PNG and JPEG are kept as-is; anything else is converted to PNG.
-        let stored = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) || bytes.starts_with(&[0xff, 0xd8]) {
+        // PNG, JPEG and GIF are kept as-is (GIF keeps its original bytes so its other
+        // frames survive save/load and can still be played back); anything else is
+        // converted to PNG.
+        let stored = if bytes.starts_with(&[0x89, b'P', b'N', b'G'])
+            || bytes.starts_with(&[0xff, 0xd8])
+            || bytes.starts_with(b"GIF8")
+        {
             bytes
         } else {
             let mut out = std::io::Cursor::new(Vec::new());
@@ -2424,6 +2429,62 @@ mod tests {
         let back = format::load(&path).unwrap();
         assert_eq!(back.pages[0].elements.len(), 1);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A tiny in-memory GIF with one solid-color frame per entry in `colors`, each
+    /// held for `delay_ms` (kept at or above `plexi_core::gif::MIN_DELAY_MS` so the
+    /// browser-style too-short-delay clamp doesn't change what the test expects).
+    fn gif(colors: &[[u8; 4]], delay_ms: u32) -> Vec<u8> {
+        use image::codecs::gif::GifEncoder;
+        use image::{Delay, Frame};
+        let mut bytes = Vec::new();
+        let mut enc = GifEncoder::new(&mut bytes);
+        for &c in colors {
+            let img = image::RgbaImage::from_pixel(4, 4, image::Rgba(c));
+            enc.encode_frame(Frame::from_parts(img, 0, 0, Delay::from_numer_denom_ms(delay_ms, 1))).unwrap();
+        }
+        drop(enc);
+        bytes
+    }
+
+    #[test]
+    fn gif_assets_keep_their_bytes_and_decode_every_frame() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        let bytes = gif(&[[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]], 150);
+        h.app.insert_image(bytes.clone(), None, &ctx);
+        h.step(vec![]);
+        let img = image_el(&h);
+        assert_eq!(
+            h.app.doc.assets.get(&img.asset).map(|b| (**b).clone()),
+            Some(bytes),
+            "a GIF's original bytes are kept as-is, so its other frames survive save/load"
+        );
+        // Painting the canvas (done as part of the step above) decodes and caches it.
+        match h.app.textures.get(&img.asset) {
+            Some(AssetTexture::Animated { frames, delays_ms, total_ms }) => {
+                assert_eq!(frames.len(), 3);
+                assert_eq!(delays_ms, &[150, 150, 150]);
+                assert_eq!(*total_ms, 450);
+            }
+            other => panic!("expected a decoded animation, got {}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn animated_images_pick_their_frame_from_elapsed_time() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.insert_image(gif(&[[255, 0, 0, 255], [0, 255, 0, 255]], 100), None, &ctx);
+        h.step(vec![]);
+        let img = image_el(&h);
+        let first_id = h.app.textures.get(&img.asset).unwrap().current(&ctx).id();
+        // Advance well past one full loop of the 200ms-long animation.
+        for _ in 0..30 {
+            h.step(vec![]);
+        }
+        let later_id = h.app.textures.get(&img.asset).unwrap().current(&ctx).id();
+        assert_ne!(first_id, later_id, "the picture shown changes as time passes");
     }
 
     fn png(w: u32, h: u32) -> Vec<u8> {

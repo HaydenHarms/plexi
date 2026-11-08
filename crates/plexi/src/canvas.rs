@@ -184,6 +184,65 @@ impl MeshCache {
     }
 }
 
+/// What an image asset decodes to: either a single still picture, or a GIF's frames
+/// with their delays, every frame already uploaded as its own texture so painting
+/// never has to touch the GPU again — only pick which handle to draw.
+pub enum AssetTexture {
+    Still(egui::TextureHandle),
+    Animated { frames: Vec<egui::TextureHandle>, delays_ms: Vec<u32>, total_ms: u32 },
+}
+
+impl AssetTexture {
+    /// The texture to show right now: the only frame for a still picture, or the
+    /// live frame of an animation (and a repaint is asked for just before it's due
+    /// to change — only while this asset is actually being painted, i.e. visible).
+    pub fn current(&self, ctx: &egui::Context) -> &egui::TextureHandle {
+        match self {
+            AssetTexture::Still(t) => t,
+            AssetTexture::Animated { frames, delays_ms, total_ms } => {
+                let elapsed_ms = ctx.input(|i| i.time) * 1000.0;
+                let (i, remaining_ms) = plexi_core::gif::frame_at(delays_ms, *total_ms, elapsed_ms);
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64((remaining_ms / 1000.0).max(0.0)));
+                &frames[i]
+            }
+        }
+    }
+
+    /// The first frame, for spots that only ever want a still picture (the crop
+    /// overlay works on a frozen view of the image anyway).
+    pub fn first(&self) -> &egui::TextureHandle {
+        match self {
+            AssetTexture::Still(t) => t,
+            AssetTexture::Animated { frames, .. } => &frames[0],
+        }
+    }
+}
+
+/// Decode an image asset's bytes into its texture(s): every frame of a GIF worth
+/// animating, or one still picture otherwise (including a GIF past the size cap, or
+/// no/unreadable bytes, which fall back to a gray placeholder).
+fn load_asset_texture(ctx: &egui::Context, asset: &str, bytes: Option<&[u8]>) -> AssetTexture {
+    if let Some(frames) = bytes.and_then(plexi_core::gif::decode_frames) {
+        let delays_ms: Vec<u32> = frames.iter().map(|f| f.delay_ms).collect();
+        let total_ms = delays_ms.iter().sum();
+        let handles = frames
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let ci = egui::ColorImage::from_rgba_unmultiplied([f.size[0] as usize, f.size[1] as usize], &f.rgba);
+                ctx.load_texture(format!("{asset}#{i}"), ci, egui::TextureOptions::LINEAR)
+            })
+            .collect();
+        return AssetTexture::Animated { frames: handles, delays_ms, total_ms };
+    }
+    let decoded = bytes.and_then(|b| image::load_from_memory(b).ok()).map(|i| i.to_rgba8());
+    let ci = match decoded {
+        Some(i) => egui::ColorImage::from_rgba_unmultiplied([i.width() as usize, i.height() as usize], i.as_raw()),
+        None => egui::ColorImage::new([1, 1], vec![Color32::from_gray(200)]),
+    };
+    AssetTexture::Still(ctx.load_texture(asset, ci, egui::TextureOptions::LINEAR))
+}
+
 pub fn color32(c: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), c.a())
 }
@@ -331,7 +390,7 @@ pub fn paint_page(
     ui: &Ui,
     input: &PaintInput,
     cache: &mut MeshCache,
-    textures: &mut HashMap<String, egui::TextureHandle>,
+    textures: &mut HashMap<String, AssetTexture>,
     fonts: &mut FontBook,
 ) {
     let painter = ui.painter_at(input.clip);
@@ -431,21 +490,10 @@ pub fn paint_page(
                 painter.galley(pos + shift, galley, color32(t.color));
             }
             Element::Image(img) => {
-                let tex = textures.entry(img.asset.clone()).or_insert_with(|| {
-                    let decoded = input
-                        .assets
-                        .get(&img.asset)
-                        .and_then(|b| image::load_from_memory(b).ok())
-                        .map(|i| i.to_rgba8());
-                    let ci = match decoded {
-                        Some(i) => egui::ColorImage::from_rgba_unmultiplied(
-                            [i.width() as usize, i.height() as usize],
-                            i.as_raw(),
-                        ),
-                        None => egui::ColorImage::new([1, 1], vec![Color32::from_gray(200)]),
-                    };
-                    ctx.load_texture(&img.asset, ci, egui::TextureOptions::LINEAR)
+                let asset = textures.entry(img.asset.clone()).or_insert_with(|| {
+                    load_asset_texture(ctx, &img.asset, input.assets.get(&img.asset).map(|b| b.as_slice()))
                 });
+                let tex = asset.current(ctx);
                 let r = view.rect_to_screen(
                     origin,
                     plexi_core::Rect::from_min_size([img.pos[0] + delta[0], img.pos[1] + delta[1]], img.size),
@@ -1347,7 +1395,7 @@ impl PlexiApp {
             });
             let full = view.rect_to_screen(origin, c.full);
             let shown = view.rect_to_screen(origin, c.shown);
-            if let Some(tex) = asset.and_then(|a| self.textures.get(&a)) {
+            if let Some(tex) = asset.and_then(|a| self.textures.get(&a)).map(AssetTexture::first) {
                 let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
                 painter.image(tex.id(), full, whole, Color32::from_white_alpha(110));
                 let uv = |q: Pos2| pos2((q.x - full.left()) / full.width(), (q.y - full.top()) / full.height());

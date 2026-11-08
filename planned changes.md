@@ -1,7 +1,7 @@
 - [x] Allow selecting multiple images holding shift
 - [x] Allow dynamic resizing, only keep ratio when holding shift
 - [x] Allow drag resizing of textboxs
-- [ ] Play animated GIFs on the canvas
+- [x] Play animated GIFs on the canvas
 - [x] Rectangle select tool (alongside the freeform lasso) to select an area, copy it and paste it elsewhere
 - [x] Hand tool: a neutral pointer for panning and grabbing, without having to pick the pen or the lasso
 - [ ] Handwriting font: a tab where you write samples with the pen, saved as your own font to type in

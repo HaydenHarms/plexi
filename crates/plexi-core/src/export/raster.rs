@@ -158,6 +158,28 @@ mod tests {
     }
 
     #[test]
+    fn gif_assets_render_only_their_first_frame() {
+        use image::codecs::gif::GifEncoder;
+        use image::{Delay, Frame};
+
+        // Red first frame, blue second — export must only ever show the red one.
+        let mut bytes = Vec::new();
+        {
+            let mut enc = GifEncoder::new(&mut bytes);
+            let red = image::RgbaImage::from_pixel(10, 10, image::Rgba([255, 0, 0, 255]));
+            let blue = image::RgbaImage::from_pixel(10, 10, image::Rgba([0, 0, 255, 255]));
+            enc.encode_frame(Frame::from_parts(red, 0, 0, Delay::from_numer_denom_ms(100, 1))).unwrap();
+            enc.encode_frame(Frame::from_parts(blue, 0, 0, Delay::from_numer_denom_ms(100, 1))).unwrap();
+        }
+        let mut assets = Assets::new();
+        assets.insert("a.gif".into(), std::sync::Arc::new(bytes));
+        let mut page = Page::new("p", PageSize::Custom([10.0, 10.0]));
+        page.elements.push(Element::Image(ImageEl::new("a.gif".into(), [0.0, 0.0], [10.0, 10.0])));
+        let img = page_rgba(&page, &assets, &RenderOptions { scale: 1.0, ..Default::default() }).unwrap();
+        assert_eq!(img.get_pixel(5, 5).0, [255, 0, 0, 255], "the still export shows the first frame, not the second");
+    }
+
+    #[test]
     fn text_styles_reach_the_svg() {
         let mut t = TextBox::new([0.0, 0.0], "hi", 20.0, Color::BLACK);
         t.font = Some("Georgia".into());

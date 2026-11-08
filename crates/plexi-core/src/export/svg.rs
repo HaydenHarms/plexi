@@ -87,7 +87,15 @@ fn opacity_attr(name: &str, c: Color) -> String {
 }
 
 pub(crate) fn mime_of(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(&[0xff, 0xd8]) { "image/jpeg" } else { "image/png" }
+    if bytes.starts_with(&[0xff, 0xd8]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF8") {
+        // Export always shows the first frame — resvg (like every SVG renderer) just
+        // decodes a GIF `<image>` as a still picture, animation and all.
+        "image/gif"
+    } else {
+        "image/png"
+    }
 }
 
 pub(crate) fn data_uri(bytes: &[u8]) -> String {
