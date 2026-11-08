@@ -68,9 +68,15 @@ pub enum Interaction {
         last: [f32; 2],
         changed: bool,
     },
-    /// `true` when Shift was held as the lasso started: its hits are added to the
-    /// selection on release instead of replacing it.
-    Lasso(Vec<[f32; 2]>, bool),
+    /// A lasso or rectangle-select drag: `pts` is the polygon hit-tested against the
+    /// page on release (the lasso's own trace, or a rectangle's four corners when
+    /// `rect` is set). `extend` is `true` when Shift was held as it started: its catch
+    /// is added to the selection on release instead of replacing it.
+    Lasso {
+        pts: Vec<[f32; 2]>,
+        extend: bool,
+        rect: bool,
+    },
     Move {
         start: [f32; 2],
         delta: [f32; 2],
@@ -821,7 +827,11 @@ impl PlexiApp {
                 let changed = self.erase_at(t, p, r);
                 self.interaction = Interaction::Erase { last: p, changed };
             }
-            Tool::Lasso => {
+            // The rectangle select tool shares every bit of this with the freeform
+            // lasso — handles, shift+click, picking up what's already selected — and
+            // differs only in how the drag below turns into a hit-tested polygon.
+            Tool::Lasso | Tool::RectSelect => {
+                let rect = tool == Tool::RectSelect;
                 if let Some((id, anchor, dir, orig)) = self.handle_at(t, view, origin, pos) {
                     self.pending_snapshot = Some(self.snapshot_of(t));
                     self.interaction = Interaction::Resize { id, anchor, dir, orig, changed: false };
@@ -843,8 +853,8 @@ impl PlexiApp {
                             self.selection.insert(id);
                             self.interaction = Interaction::Move { start: p, delta: [0.0, 0.0] };
                         }
-                        // Empty space: a lasso that adds its catch to the selection.
-                        None => self.interaction = Interaction::Lasso(vec![p], true),
+                        // Empty space: a lasso/rectangle that adds its catch to the selection.
+                        None => self.interaction = Interaction::Lasso { pts: vec![p], extend: true, rect },
                     }
                     return;
                 }
@@ -857,7 +867,22 @@ impl PlexiApp {
                     self.interaction = Interaction::Move { start: p, delta: [0.0, 0.0] };
                 } else {
                     self.selection.clear();
-                    self.interaction = Interaction::Lasso(vec![p], false);
+                    self.interaction = Interaction::Lasso { pts: vec![p], extend: false, rect };
+                }
+            }
+            Tool::Hand => {
+                // A neutral pointer: grab and move whatever's under it, or pan empty
+                // canvas. It never draws, and it never starts a lasso.
+                let inside = self.selection_bounds(t).is_some_and(|b| b.expand(6.0 / view.zoom).contains(p));
+                if inside {
+                    self.interaction = Interaction::Move { start: p, delta: [0.0, 0.0] };
+                } else if let Some(id) = self.hit_element(t, p, 4.0 / view.zoom, false) {
+                    self.selection = [id].into();
+                    self.interaction = Interaction::Move { start: p, delta: [0.0, 0.0] };
+                } else if matches!(t, Target::Page(_)) {
+                    // Empty canvas: pan. The screen overlay has no view to pan (it
+                    // always paints at `View::default()`), so it just stays idle.
+                    self.interaction = Interaction::Pan { last: pos };
                 }
             }
             // Text boxes open on release: egui drops keyboard focus on the click that
@@ -949,8 +974,12 @@ impl PlexiApp {
                     *changed = true;
                 }
             }
-            Interaction::Lasso(pts, _) => {
-                if pts.last().is_none_or(|l| dist(*l, p) > 2.0 / view.zoom) {
+            Interaction::Lasso { pts, rect, .. } => {
+                if *rect {
+                    // Keep just the rectangle's four corners, start to current point.
+                    let start = pts[0];
+                    *pts = vec![start, [p[0], start[1]], p, [start[0], p[1]]];
+                } else if pts.last().is_none_or(|l| dist(*l, p) > 2.0 / view.zoom) {
                     pts.push(p);
                 }
             }
@@ -1006,7 +1035,7 @@ impl PlexiApp {
                     self.touch();
                 }
             }
-            Interaction::Lasso(pts, extend) => {
+            Interaction::Lasso { pts, extend, .. } => {
                 if pts.len() < 3 {
                     // A click on empty space, or on a locked image.
                     if let Some(p) = pts.first()
@@ -1166,7 +1195,7 @@ impl PlexiApp {
                 ring(r, Color32::from_black_alpha(120));
             }
             Tool::Text => ui.ctx().set_cursor_icon(CursorIcon::Text),
-            Tool::Lasso => {
+            Tool::Lasso | Tool::RectSelect => {
                 let p = view.to_page(rect.min, pos);
                 let handle = match &self.interaction {
                     Interaction::Resize { dir, .. } => Some(*dir),
@@ -1187,6 +1216,14 @@ impl PlexiApp {
                 };
                 ui.ctx().set_cursor_icon(icon);
             }
+            Tool::Hand => {
+                let icon = if matches!(self.interaction, Interaction::Move { .. }) {
+                    CursorIcon::Grabbing
+                } else {
+                    CursorIcon::Grab
+                };
+                ui.ctx().set_cursor_icon(icon);
+            }
             Tool::Shape(_) => ui.ctx().set_cursor_icon(CursorIcon::Crosshair),
             Tool::Eraser => {}
         }
@@ -1204,7 +1241,7 @@ impl PlexiApp {
             i.pointer.button_double_clicked(PointerButton::Primary)
                 || i.pointer.button_triple_clicked(PointerButton::Primary)
         });
-        if double && self.tool == Tool::Lasso && self.crop.is_none() {
+        if double && matches!(self.tool, Tool::Lasso | Tool::RectSelect) && self.crop.is_none() {
             // Double-click a text box with the select tool to edit it.
             let on_canvas = |q: &Pos2| rect.contains(*q) && ui.ctx().layer_id_at(*q).is_none_or(|l| l == ui.layer_id());
             let p =
@@ -1295,7 +1332,7 @@ impl PlexiApp {
                 };
                 paint_shape(&painter, &s, view, origin, [0.0, 0.0]);
             }
-            Interaction::Lasso(pts, _) if pts.len() > 1 => {
+            Interaction::Lasso { pts, .. } if pts.len() > 1 => {
                 let screen: Vec<Pos2> = pts.iter().map(|p| view.to_screen(origin, *p)).collect();
                 let mut closed = screen.clone();
                 closed.push(screen[0]);

@@ -75,6 +75,8 @@ pub enum Icon {
     Highlighter,
     Eraser,
     Lasso,
+    RectSelect,
+    Hand,
     Text,
     Line,
     Arrow,
@@ -100,6 +102,8 @@ fn tool_icon(t: Tool) -> Icon {
         Tool::Highlighter => Icon::Highlighter,
         Tool::Eraser => Icon::Eraser,
         Tool::Lasso => Icon::Lasso,
+        Tool::RectSelect => Icon::RectSelect,
+        Tool::Hand => Icon::Hand,
         Tool::Text => Icon::Text,
         Tool::Shape(ShapeKind::Line) => Icon::Line,
         Tool::Shape(ShapeKind::Arrow) => Icon::Arrow,
@@ -142,6 +146,18 @@ pub fn paint_icon(p: &Painter, r: Rect, icon: Icon, c: Color32) {
             let pts = arc(8.0, 6.5, 5.5, 0.0, std::f32::consts::TAU);
             p.extend(EShape::dashed_line(&pts, st, 2.2 * s, 1.6 * s));
             line(&[(4.5, 10.5), (4.0, 13.0), (6.0, 14.5)]);
+        }
+        Icon::RectSelect => {
+            let c = [at(2.5, 3.0), at(13.5, 3.0), at(13.5, 13.0), at(2.5, 13.0), at(2.5, 3.0)];
+            p.extend(EShape::dashed_line(&c, st, 2.2 * s, 1.6 * s));
+        }
+        Icon::Hand => {
+            // Palm, with four fingers above and a thumb out to the side.
+            p.rect_stroke(Rect::from_min_max(at(4.0, 7.5), at(12.0, 13.0)), 2.0 * s, st, StrokeKind::Middle);
+            for x in [5.5, 7.5, 9.5, 11.0] {
+                line(&[(x, 7.5), (x, 2.5)]);
+            }
+            line(&[(4.0, 9.5), (1.5, 8.0), (2.3, 6.3), (4.0, 7.5)]);
         }
         Icon::Text => {
             line(&[(3.0, 4.0), (3.0, 2.5), (13.0, 2.5), (13.0, 4.0)]);
@@ -281,7 +297,7 @@ fn vsep(ui: &mut Ui) {
 // ----- toolbars ---------------------------------------------------------------------
 
 fn tool_buttons(app: &mut PlexiApp, ui: &mut Ui, overlay: bool) {
-    for tool in [Tool::Pen, Tool::Highlighter, Tool::Eraser, Tool::Lasso, Tool::Text] {
+    for tool in [Tool::Pen, Tool::Highlighter, Tool::Eraser, Tool::Lasso, Tool::RectSelect, Tool::Hand, Tool::Text] {
         if icon_button(ui, tool_icon(tool), app.tool == tool, tool.label()).clicked() {
             app.tool = tool;
         }
@@ -322,7 +338,9 @@ const TEXT_SIZES: [f32; 14] = [10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 28.0, 3
 /// A second bar under the toolbar with the text controls, while there is text to style:
 /// the text tool is out, a box is being edited, or text is selected.
 fn text_bar(app: &mut PlexiApp, ctx: &Context, y: f32) {
-    let text = app.tool == Tool::Text || app.editing_text.is_some() || (app.tool == Tool::Lasso && app.text_selected());
+    let text = app.tool == Tool::Text
+        || app.editing_text.is_some()
+        || (matches!(app.tool, Tool::Lasso | Tool::RectSelect) && app.text_selected());
     if !text {
         return;
     }
@@ -959,6 +977,8 @@ enum Cmd {
     SelectAll,
     Delete,
     Duplicate,
+    Copy,
+    PasteSelection,
     PartialEraser,
     Settings,
     CheckUpdates,
@@ -992,6 +1012,8 @@ fn commands(app: &PlexiApp) -> Vec<(Cmd, String, String)> {
         (Cmd::SelectAll, "Select all".into(), "Ctrl+A".into()),
         (Cmd::Delete, "Delete selection".into(), "Del".into()),
         (Cmd::Duplicate, "Duplicate selection".into(), "Ctrl+D".into()),
+        (Cmd::Copy, "Copy selection".into(), "Ctrl+C".into()),
+        (Cmd::PasteSelection, "Paste copied selection".into(), "Ctrl+V".into()),
         (
             Cmd::PartialEraser,
             format!("Eraser: {}", if app.config.eraser_partial { "erase whole strokes" } else { "erase partially" }),
@@ -1007,6 +1029,8 @@ fn commands(app: &PlexiApp) -> Vec<(Cmd, String, String)> {
         Tool::Highlighter,
         Tool::Eraser,
         Tool::Lasso,
+        Tool::RectSelect,
+        Tool::Hand,
         Tool::Text,
         Tool::Shape(ShapeKind::Line),
         Tool::Shape(ShapeKind::Arrow),
@@ -1085,6 +1109,8 @@ fn run_cmd(app: &mut PlexiApp, ctx: &Context, cmd: Cmd) {
         Cmd::SelectAll => app.select_all(),
         Cmd::Delete => app.delete_selection(),
         Cmd::Duplicate => app.duplicate_selection(),
+        Cmd::Copy => app.copy_selection(ctx),
+        Cmd::PasteSelection => app.paste_selection(ctx),
         Cmd::PartialEraser => app.config.eraser_partial = !app.config.eraser_partial,
         Cmd::Settings => app.settings_open = true,
         Cmd::CheckUpdates => app.check_for_updates(ctx, true),
@@ -1756,7 +1782,7 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
             ("Snip an area of the screen", app.config.hotkey_snip.clone()),
             ("Command palette", "Ctrl+K".into()),
             ("Pen · Highlighter · Eraser", "P · H · E".into()),
-            ("Select · Text", "S · T".into()),
+            ("Select (lasso) · Rectangle select · Hand · Text", "S · M · G · T".into()),
             ("Line · Arrow · Rect · Ellipse", "L · A · R · O".into()),
             ("Colors", "1 – 9".into()),
             ("Thinner / thicker", "[ · ]".into()),
@@ -1771,7 +1797,9 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
             ("Undo · Redo", "Ctrl+Z · Ctrl+Y".into()),
             ("New page · Next · Previous", "Ctrl+Enter · PgDn · PgUp".into()),
             ("Select all · Duplicate · Delete", "Ctrl+A · Ctrl+D · Del".into()),
+            ("Add to the selection (lasso or rectangle)", "hold Shift".into()),
             ("Straight lines, squares", "hold Shift".into()),
+            ("Copy selection · paste it back", "Ctrl+C · Ctrl+V".into()),
             ("Paste image or text", "Ctrl+V".into()),
             ("Save · Open · Export · Print", "Ctrl+S · Ctrl+O · Ctrl+E · Ctrl+P".into()),
             ("On screen: click-through · clear · snapshot", "Esc · C · Ctrl+Shift+C".into()),

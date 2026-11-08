@@ -403,11 +403,15 @@ fn picture() -> Vec<u8> {
 const PEN: (f32, f32) = (142.0, 34.0);
 const HIGHLIGHTER: (f32, f32) = (178.0, 34.0);
 const SELECT: (f32, f32) = (250.0, 34.0);
-const TEXT: (f32, f32) = (286.0, 34.0);
-const SHAPE: (f32, f32) = (322.0, 34.0);
-const BLACK: (f32, f32) = (362.0, 34.0);
-const BLUE: (f32, f32) = (388.0, 34.0);
-const RED: (f32, f32) = (414.0, 34.0);
+// Rectangle select and Hand sit between Select and Text, so everything from Text on
+// is shifted two icon buttons (36pt each) right of where it used to be.
+const RECT_SELECT: (f32, f32) = (286.0, 34.0);
+const HAND: (f32, f32) = (322.0, 34.0);
+const TEXT: (f32, f32) = (358.0, 34.0);
+const SHAPE: (f32, f32) = (394.0, 34.0);
+const BLACK: (f32, f32) = (434.0, 34.0);
+const BLUE: (f32, f32) = (460.0, 34.0);
+const RED: (f32, f32) = (486.0, 34.0);
 
 #[test]
 #[ignore = "records docs/tour.gif; needs ffmpeg"]
@@ -564,6 +568,18 @@ fn preview_tools() {
     );
     r.wait(0.2);
     r.snapshot("cropped");
+
+    // Rectangle select: drag a marquee around everything, then Hand: pan the view.
+    r.click(RECT_SELECT);
+    r.drag(PointerButton::Primary, &[(60.0, 90.0), (760.0, 90.0), (760.0, 520.0), (60.0, 520.0), (60.0, 100.0)], 1);
+    r.wait(0.2);
+    r.snapshot("rect-select");
+    r.click(HAND);
+    let pan: Vec<(f32, f32)> = (0..=20).map(|i| (500.0 - i as f32 * 4.0, 300.0 - i as f32 * 2.0)).collect();
+    r.drag(PointerButton::Primary, &pan, 1);
+    r.wait(0.2);
+    r.snapshot("panned-hand");
+
     let far = plexi_core::Shape {
         id: plexi_core::new_id(),
         kind: plexi_core::ShapeKind::Rect,

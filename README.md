@@ -59,10 +59,12 @@ and draw-on-screen covers the main display.
 | Snip an area → page + clipboard | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> (anywhere), or the scissors button |
 | Screenshot with ink → clipboard | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> while drawing on screen |
 | Pen, highlighter, eraser | <kbd>P</kbd> <kbd>H</kbd> <kbd>E</kbd>, or middle-drag / pen barrel button to erase |
-| Select (lasso), text | <kbd>S</kbd> <kbd>T</kbd>; double-click text to edit it; font, size and style in the bar under the toolbar; <kbd>Shift</kbd>+click adds or removes one element from the selection |
+| Select (lasso), rectangle select, text | <kbd>S</kbd> <kbd>M</kbd> <kbd>T</kbd>; double-click text to edit it; font, size and style in the bar under the toolbar; <kbd>Shift</kbd>+click or drag adds or removes elements from the selection |
+| Hand | <kbd>G</kbd>; drag empty canvas to pan, drag an element to grab and move it |
+| Copy, paste | <kbd>Ctrl</kbd>+<kbd>C</kbd> <kbd>Ctrl</kbd>+<kbd>V</kbd>; a copy also goes to the system clipboard as a picture |
 | Line, arrow, rectangle, ellipse | <kbd>L</kbd> <kbd>A</kbd> <kbd>R</kbd> <kbd>O</kbd> (hold <kbd>Shift</kbd> to snap) |
 | Colors, width | <kbd>1</kbd>–<kbd>9</kbd>, <kbd>[</kbd> <kbd>]</kbd> |
-| Pan, zoom | right-drag, <kbd>Space</kbd>+drag, <kbd>Shift</kbd>+scroll, two fingers · scroll wheel, pinch |
+| Pan, zoom | <kbd>G</kbd>+drag, right-drag, <kbd>Space</kbd>+drag, <kbd>Shift</kbd>+scroll, two fingers · scroll wheel, pinch |
 | Pages | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> new, <kbd>PgDn</kbd> / <kbd>PgUp</kbd>, trash button to delete (undoable) |
 | Images | paste or drop; drag a corner to resize freely (<kbd>Shift</kbd>: keep proportions) |
 | Text boxes | drag a corner handle to set a wrap width |

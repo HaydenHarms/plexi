@@ -27,6 +27,8 @@ pub enum Tool {
     Highlighter,
     Eraser,
     Lasso,
+    RectSelect,
+    Hand,
     Text,
     Shape(ShapeKind),
 }
@@ -38,6 +40,8 @@ impl Tool {
             Tool::Highlighter => "Highlighter (H)",
             Tool::Eraser => "Eraser (E) — middle-drag erases with any tool",
             Tool::Lasso => "Select (S) — lasso, drag to move, Del to delete",
+            Tool::RectSelect => "Rectangle select (M) — drag a box to select, Del to delete",
+            Tool::Hand => "Hand (G) — drag to pan, or to grab and move an element",
             Tool::Text => "Text (T)",
             Tool::Shape(ShapeKind::Line) => "Line (L)",
             Tool::Shape(ShapeKind::Arrow) => "Arrow (A)",
@@ -245,6 +249,9 @@ pub struct PlexiApp {
     /// something.
     pub pending_snapshot: Option<Snapshot>,
     pub selection: HashSet<u64>,
+    /// The last copied selection (Ctrl+C), pasted back with Ctrl+V. Elements keep their
+    /// ids until paste gives the copies fresh ones, so repeated pastes don't collide.
+    pub clip: Option<Vec<Element>>,
     pub editing_text: Option<(Target, u64)>,
     pub text_buf: String,
     pub text_focus_pending: bool,
@@ -313,6 +320,7 @@ impl PlexiApp {
             interaction: Interaction::Idle,
             pending_snapshot: None,
             selection: HashSet::new(),
+            clip: None,
             editing_text: None,
             text_buf: String::new(),
             text_focus_pending: false,
@@ -1104,6 +1112,60 @@ impl PlexiApp {
         self.page_mut(t).elements.extend(copies);
     }
 
+    /// Copy the selection (works the same for the lasso and the rectangle select tool)
+    /// onto Plexi's own clipboard, ready for [`PlexiApp::paste_selection`]. Also puts a
+    /// PNG of the selection on the system clipboard, so it can be pasted into other
+    /// apps too — best-effort, and never at the cost of the internal copy.
+    pub fn copy_selection(&mut self, ctx: &Context) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let t = self.target();
+        let elements: Vec<Element> =
+            self.page_ref(t).elements.iter().filter(|e| self.selection.contains(&e.id())).cloned().collect();
+        if elements.is_empty() {
+            return;
+        }
+        if let Some(bounds) = self.selection_bounds(t) {
+            let opts = RenderOptions { scale: ctx.pixels_per_point(), background: false, ..Default::default() };
+            if let Ok(img) = plexi_core::export::raster::area_rgba(self.page_ref(t), &self.doc.assets, &opts, bounds) {
+                let ci = egui::ColorImage::from_rgba_unmultiplied(
+                    [img.width() as usize, img.height() as usize],
+                    img.as_raw(),
+                );
+                ctx.copy_image(ci);
+            }
+        }
+        let n = elements.len();
+        self.clip = Some(elements);
+        self.toast(if n == 1 { "Copied".to_owned() } else { format!("Copied {n} elements") });
+    }
+
+    /// Paste the last copied selection back into the current target, offset so it lands
+    /// centered on the visible canvas, and select the pasted copies.
+    pub fn paste_selection(&mut self, ctx: &Context) {
+        let Some(clip) = self.clip.clone() else { return };
+        let t = self.target();
+        self.checkpoint(t);
+        let bounds = clip.iter().map(Element::bounds).reduce(|a, b| a.union(b));
+        let offset = match bounds {
+            Some(b) => {
+                let c = self.view_center(ctx);
+                [c[0] - b.center()[0], c[1] - b.center()[1]]
+            }
+            None => [24.0, 24.0],
+        };
+        let mut pasted = clip;
+        let mut new_sel = HashSet::new();
+        for e in &mut pasted {
+            e.translate(offset[0], offset[1]);
+            e.renew_id();
+            new_sel.insert(e.id());
+        }
+        self.page_mut(t).elements.extend(pasted);
+        self.selection = new_sel;
+    }
+
     pub fn select_all(&mut self) {
         self.tool = Tool::Lasso;
         self.selection =
@@ -1281,7 +1343,8 @@ impl PlexiApp {
         ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
         ctx.send_viewport_cmd(ViewportCommand::Title("Plexi — drawing on screen".into()));
-        if matches!(self.tool, Tool::Lasso | Tool::Text | Tool::Shape(ShapeKind::Line)) {
+        if matches!(self.tool, Tool::Lasso | Tool::RectSelect | Tool::Hand | Tool::Text | Tool::Shape(ShapeKind::Line))
+        {
             self.tool = Tool::Pen;
         }
         self.mode = Mode::Overlay(Overlay {
@@ -1733,6 +1796,12 @@ impl PlexiApp {
         if cmd(Key::D) {
             self.duplicate_selection();
         }
+        if cmd(Key::C) {
+            self.copy_selection(ctx);
+        }
+        if cmd(Key::V) {
+            self.paste_selection(ctx);
+        }
         if cmd(Key::Comma) {
             self.settings_open = !self.settings_open;
         }
@@ -1747,6 +1816,12 @@ impl PlexiApp {
         }
         if plain(Key::S) || plain(Key::V) {
             self.tool = Tool::Lasso;
+        }
+        if plain(Key::M) {
+            self.tool = Tool::RectSelect;
+        }
+        if plain(Key::G) {
+            self.tool = Tool::Hand;
         }
         if plain(Key::T) {
             self.tool = Tool::Text;
@@ -2201,6 +2276,99 @@ mod tests {
         h.set_shift(false);
         assert_eq!(h.app.selection.len(), 2, "the second lasso's catch joins the first");
         assert!(h.app.selection.contains(&first), "the first stroke is still selected");
+    }
+
+    #[test]
+    fn rect_select_picks_whats_inside_the_box_and_shift_extends_it() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 500.0));
+        assert_eq!(h.elements().len(), 2);
+        h.app.tool = Tool::RectSelect;
+        // A straight-sided box around only the first stroke.
+        h.drag(PointerButton::Primary, &[(250.0, 250.0), (550.0, 350.0)]);
+        assert_eq!(h.app.selection.len(), 1);
+        let first = *h.app.selection.iter().next().unwrap();
+        // Same Shift-extends behavior as the freeform lasso.
+        h.set_shift(true);
+        h.drag(PointerButton::Primary, &[(250.0, 450.0), (550.0, 550.0)]);
+        h.set_shift(false);
+        assert_eq!(h.app.selection.len(), 2, "the second box's catch joins the first");
+        assert!(h.app.selection.contains(&first), "the first stroke is still selected");
+    }
+
+    #[test]
+    fn copy_and_paste_a_selection_works_the_same_for_lasso_and_rect_select() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
+        assert_eq!(h.elements().len(), 1);
+
+        // Lasso around the stroke, copy it, paste it: a second stroke appears, selected,
+        // and the original is untouched.
+        h.app.tool = Tool::Lasso;
+        h.drag(
+            PointerButton::Primary,
+            &[(250.0, 250.0), (550.0, 250.0), (550.0, 350.0), (250.0, 350.0), (250.0, 260.0)],
+        );
+        assert_eq!(h.app.selection.len(), 1);
+        h.app.copy_selection(&ctx);
+        h.app.paste_selection(&ctx);
+        assert_eq!(h.elements().len(), 2, "paste added a copy");
+        assert_eq!(h.app.selection.len(), 1, "only the pasted copy is selected");
+        let pasted = *h.app.selection.iter().next().unwrap();
+        assert!(h.elements().iter().any(|e| e.id() != pasted), "the original is still there");
+
+        // Pasting again drops another copy, with yet another fresh id.
+        h.app.paste_selection(&ctx);
+        assert_eq!(h.elements().len(), 3);
+        assert!(!h.app.selection.contains(&pasted), "the newest paste replaces the selection");
+
+        // The rectangle select tool copies and pastes exactly the same way.
+        h.app.tool = Tool::RectSelect;
+        h.app.selection.clear();
+        h.drag(PointerButton::Primary, &[(250.0, 250.0), (550.0, 350.0)]);
+        assert_eq!(h.app.selection.len(), 1);
+        h.app.copy_selection(&ctx);
+        let before = h.elements().len();
+        h.app.paste_selection(&ctx);
+        assert_eq!(h.elements().len(), before + 1, "rect-select copy/paste also adds a copy");
+
+        // Paste is a no-op without anything copied.
+        h.app.clip = None;
+        let n = h.elements().len();
+        h.app.paste_selection(&ctx);
+        assert_eq!(h.elements().len(), n, "nothing to paste");
+    }
+
+    #[test]
+    fn hand_tool_pans_empty_canvas_and_grabs_an_element() {
+        let mut h = Harness::new();
+        h.app.tool = Tool::Hand;
+        // Empty canvas: panning, just like Space+drag or a right-drag.
+        let before = h.app.view.offset;
+        h.drag(PointerButton::Primary, &[(400.0, 300.0), (420.0, 340.0), (450.0, 380.0)]);
+        assert_eq!(h.app.view.offset - before, egui::vec2(50.0, 80.0), "dragged empty canvas pans the view");
+        assert!(h.elements().is_empty(), "the hand tool never draws");
+
+        // On an element: grabs and moves it instead of panning. The view hasn't moved
+        // since the stroke was drawn, so the same screen point still lands on it.
+        h.app.tool = Tool::Pen;
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
+        assert_eq!(h.elements().len(), 1);
+        h.app.tool = Tool::Hand;
+        let before_offset = h.app.view.offset;
+        h.drag(PointerButton::Primary, &[(400.0, 300.0), (430.0, 300.0), (460.0, 310.0)]);
+        assert_eq!(h.app.selection.len(), 1, "clicking an element selects it");
+        assert_eq!(h.app.view.offset, before_offset, "grabbing an element doesn't also pan");
+
+        // In the screen overlay there's no view to pan; dragging empty space is a no-op.
+        let ctx = h.ctx.clone();
+        h.app.enter_overlay(&ctx, false);
+        h.step(vec![]);
+        h.app.tool = Tool::Hand;
+        h.drag(PointerButton::Primary, &[(100.0, 100.0), (150.0, 150.0), (200.0, 200.0)]);
+        assert!(h.app.doc.overlay.elements.is_empty(), "the hand tool still never draws, even on screen");
     }
 
     #[test]
