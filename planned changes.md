@@ -9,3 +9,4 @@
 - [ ] Saved message text stacks weird
 - [ ] F2 to edit currently selected text box
 - [ ] Right-click remove background function
+- [ ] Ctrl + b, i, u for font changing
