@@ -279,6 +279,7 @@ mod tests {
             crop: None,
             group: 0,
             rotation: 0.0,
+            inner_rotation: 0.0,
         }));
         for kind in [ShapeKind::Line, ShapeKind::Arrow, ShapeKind::Rect, ShapeKind::Ellipse] {
             p.elements.push(Element::Shape(Shape {

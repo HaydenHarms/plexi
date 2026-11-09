@@ -2092,6 +2092,7 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
                 ("Menu: lock image, group, arrange, paper, delete page", "Right-click (no drag)".into()),
                 ("Resize an image or shape", "Select it, drag a corner (Shift: keep proportions)".into()),
                 ("Turn what's selected", "Drag the round handle above it (Shift: 15° steps)".into()),
+                ("Turn a cropped photo inside its frame", "Shift+drag the round handle".into()),
                 ("Set a text box's wrap width", "Drag the handle on its left or right side".into()),
                 ("Resize a text box", "Drag a corner (Shift: keep proportions)".into()),
                 ("Crop an image · take out its background", "Right-click it → Crop image · Remove background".into()),

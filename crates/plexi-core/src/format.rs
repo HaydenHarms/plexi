@@ -153,6 +153,7 @@ mod tests {
             crop: None,
             group: 0,
             rotation: 0.0,
+            inner_rotation: 0.0,
         }));
         d.overlay.elements.push(Element::Shape(Shape {
             id: new_id(),

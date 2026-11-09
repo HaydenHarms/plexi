@@ -631,6 +631,43 @@ fn preview_tools() {
 }
 
 #[test]
+#[ignore = "renders stills of a cropped picture turned inside its frame, and cropping it"]
+fn preview_inner_turn() {
+    use crate::app::Tool;
+    let out = std::env::temp_dir().join("plexi-preview-inner");
+    let mut r = Recorder::new(&out);
+    let ctx = r.ctx.clone();
+    let img = image::RgbaImage::from_fn(300, 200, |x, y| {
+        let stripe = (x / 30 + y / 30) % 2 == 0;
+        if stripe { image::Rgba([40, 120, 220, 255]) } else { image::Rgba([250, 200, 60, 255]) }
+    });
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    r.app.insert_image(bytes.into_inner(), Some([400.0, 300.0]), &ctx);
+    let id = r.app.selection.iter().next().copied().unwrap();
+    let i = r.app.doc.pages[0].find(id).unwrap();
+    if let plexi_core::Element::Image(img) = &mut r.app.doc.pages[0].elements[i] {
+        let f = img.full_rect();
+        img.set_crop(plexi_core::Rect::from_min_size(
+            [f.min[0] + f.width() * 0.2, f.min[1] + f.height() * 0.2],
+            [f.width() * 0.6, f.height() * 0.6],
+        ));
+        img.inner_rotation = 0.35;
+    }
+    r.app.doc.pages[0].elements[i].renew_id();
+    r.app.selection = [r.app.doc.pages[0].elements[i].id()].into();
+    r.app.tool = Tool::Hand;
+    r.wait(0.3);
+    r.snapshot("turned-inside");
+    let id = r.app.doc.pages[0].elements[i].id();
+    r.app.start_crop(r.app.target(), id);
+    r.wait(0.3);
+    r.snapshot("cropping");
+    r.app.finish_crop(true);
+    r.finish();
+}
+
+#[test]
 #[ignore = "renders stills of rotating, outlines, shape handles, groups, the toast and print placement"]
 fn preview_round_four() {
     use crate::app::Tool;

@@ -83,7 +83,7 @@ and draw-on-screen covers the main display.
 | Pan, zoom | <kbd>G</kbd>+drag, right-drag, <kbd>Space</kbd>+drag, <kbd>Shift</kbd>+scroll, two fingers · scroll wheel, pinch |
 | Pages | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> new, <kbd>PgDn</kbd> / <kbd>PgUp</kbd>, trash button to delete (undoable) |
 | Images, shapes | paste or drop images; drag a corner (or a line's end) to resize freely (<kbd>Shift</kbd>: keep proportions) |
-| Turn | drag the round handle above what's selected (<kbd>Shift</kbd>: 15° steps) |
+| Turn | drag the round handle above what's selected (<kbd>Shift</kbd>: 15° steps); on a cropped photo, <kbd>Shift</kbd> turns the photo inside its frame instead, to straighten it |
 | Text boxes | drag a corner to resize: across sets the width, up and down the font size (<kbd>Shift</kbd>: scale both together); drag the handle on either side to set a wrap width; <kbd>F2</kbd> edits the selected box; <kbd>Ctrl</kbd>+<kbd>B</kbd> <kbd>Ctrl</kbd>+<kbd>I</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd> bold, italic, underline |
 | Group, ungroup | <kbd>Ctrl</kbd>+<kbd>G</kbd>, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd>, or right-click; a group is picked up and moved as one |
 | Crop or lock an image, remove its background, arrange, paper color, sheet outlines and numbers | right-click |

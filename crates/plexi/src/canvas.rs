@@ -120,11 +120,13 @@ pub enum Interaction {
     /// Turning the selection with the handle above it, around `center`. `start` is the
     /// pointer's angle around it when the drag began, `orig` every selected element (and
     /// where it is in the page) as it was then, and `angle` how far it has turned.
+    /// `inner` turns a cropped picture inside its frame instead (Shift on one).
     Rotate {
         center: [f32; 2],
         start: f32,
         orig: Vec<(usize, Element)>,
         angle: f32,
+        inner: bool,
     },
     /// Dragging a side handle of a text box to change its wrap width. `anchor_x` is the
     /// x of the opposite edge (which stays put), `dir_x` is +1 when the dragged handle is
@@ -205,9 +207,41 @@ const EDIT_GUIDE_PAD: f32 = 3.0;
 pub struct CropState {
     pub target: Target,
     pub id: u64,
+    /// How far the crop can reach: the whole picture (or, turned inside its frame, the
+    /// box around it).
     pub full: plexi_core::Rect,
     pub shown: plexi_core::Rect,
     pub drag: Option<CropDrag>,
+    /// The whole, unturned picture, and the turn inside its frame it shows with (around
+    /// `pivot`), fixed while cropping.
+    pub picture: plexi_core::Rect,
+    pub pivot: [f32; 2],
+    pub inner: f32,
+}
+
+/// A mesh showing `poly` (page positions with texture coordinates, see
+/// `plexi_core::picture_polygon`), turned by `angle` around `c` and moved by `delta`.
+#[allow(clippy::too_many_arguments)]
+fn picture_mesh(
+    tex: egui::TextureId,
+    poly: &[([f32; 2], [f32; 2])],
+    view: View,
+    origin: Pos2,
+    c: [f32; 2],
+    angle: f32,
+    delta: [f32; 2],
+    tint: Color32,
+) -> egui::Mesh {
+    let mut mesh = egui::Mesh::with_texture(tex);
+    for (p, uv) in poly {
+        let q = rotate_point(*p, c, angle);
+        let pos = view.to_screen(origin, [q[0] + delta[0], q[1] + delta[1]]);
+        mesh.vertices.push(Vertex { pos, uv: pos2(uv[0], uv[1]), color: tint });
+    }
+    for k in 1..poly.len().saturating_sub(1) as u32 {
+        mesh.indices.extend([0, k, k + 1]);
+    }
+    mesh
 }
 
 /// A crop edge being dragged. `edge` is -1/0/1 per axis (left/none/right, top/none/
@@ -619,7 +653,21 @@ pub fn paint_page(
                 );
                 let [u0, v0, u1, v1] = img.crop_or_full();
                 let uv = Rect::from_min_max(pos2(u0, v0), pos2(u1, v1));
-                if img.rotation == 0.0 {
+                if img.crop.is_some() || img.inner_rotation != 0.0 {
+                    // The (maybe turned) picture cut to its frame.
+                    let poly = img.visible_polygon();
+                    let c = img.frame_center();
+                    painter.add(EShape::mesh(picture_mesh(
+                        tex.id(),
+                        &poly,
+                        view,
+                        origin,
+                        c,
+                        img.rotation,
+                        delta,
+                        Color32::WHITE,
+                    )));
+                } else if img.rotation == 0.0 {
                     painter.image(tex.id(), r, uv, Color32::WHITE);
                 } else {
                     let mut mesh = egui::Mesh::with_texture(tex.id());
@@ -968,7 +1016,7 @@ impl PlexiApp {
     }
 
     /// Start turning the selection if `pos` is on the rotate handle.
-    fn grab_rotate(&mut self, t: Target, view: View, origin: Pos2, pos: Pos2) -> bool {
+    fn grab_rotate(&mut self, t: Target, view: View, origin: Pos2, pos: Pos2, shift: bool) -> bool {
         let Some((handle, _)) = self.rotate_handle(t, view, origin) else { return false };
         if handle.distance(pos) > HANDLE_REACH + 2.0 {
             return false;
@@ -986,15 +1034,17 @@ impl PlexiApp {
             .collect();
         self.pending_snapshot = Some(self.snapshot_of(t));
         let start = (p[1] - center[1]).atan2(p[0] - center[0]);
-        self.interaction = Interaction::Rotate { center, start, orig, angle: 0.0 };
+        // Shift on a single cropped picture turns the picture inside its frame.
+        let inner = shift && matches!(orig.as_slice(), [(_, Element::Image(i))] if i.crop.is_some());
+        self.interaction = Interaction::Rotate { center, start, orig, angle: 0.0, inner };
         true
     }
 
     /// Start dragging the resize handle under `pos`, if there is one: a corner of the
     /// selected image (when `images`), or a side of a text box. Shared by every tool
     /// that can resize, so the handles work the same whichever of them is out.
-    fn grab_handle(&mut self, t: Target, view: View, origin: Pos2, pos: Pos2, images: bool) -> bool {
-        if images && self.grab_rotate(t, view, origin, pos) {
+    fn grab_handle(&mut self, t: Target, view: View, origin: Pos2, pos: Pos2, images: bool, shift: bool) -> bool {
+        if images && self.grab_rotate(t, view, origin, pos, shift) {
             return true;
         }
         if images && let Some((id, anchor, dir, orig)) = self.handle_at(t, view, origin, pos) {
@@ -1026,7 +1076,9 @@ impl PlexiApp {
             return;
         }
         let shown = plexi_core::Rect::from_min_size(img.pos, img.size);
-        self.crop = Some(CropState { target: t, id, full: img.full_rect(), shown, drag: None });
+        let (picture, pivot, inner) = (img.full_rect(), img.frame_center(), img.inner_rotation);
+        let full = plexi_core::Rect::from_points(img.picture_quad());
+        self.crop = Some(CropState { target: t, id, full, shown, drag: None, picture, pivot, inner });
         self.selection.clear();
         self.interaction = Interaction::Idle;
         self.toast("Drag the edges to crop — Enter to apply, Esc to cancel");
@@ -1248,7 +1300,7 @@ impl PlexiApp {
             // differs only in how the drag below turns into a hit-tested polygon.
             Tool::Lasso | Tool::RectSelect => {
                 let rect = tool == Tool::RectSelect;
-                if self.grab_handle(t, view, origin, pos, true) {
+                if self.grab_handle(t, view, origin, pos, true, shift) {
                     return;
                 }
                 if shift {
@@ -1274,7 +1326,7 @@ impl PlexiApp {
             Tool::Hand => {
                 // A neutral pointer: resize with the handles, grab and move whatever's
                 // under it, or pan empty canvas. It never draws or starts a lasso.
-                if self.grab_handle(t, view, origin, pos, true) {
+                if self.grab_handle(t, view, origin, pos, true, shift) {
                     return;
                 }
                 if shift {
@@ -1304,7 +1356,7 @@ impl PlexiApp {
             // Text boxes open on release: egui drops keyboard focus on the click that
             // ends a press, so a box opened on press would close immediately.
             Tool::Text => {
-                if !self.grab_handle(t, view, origin, pos, false) {
+                if !self.grab_handle(t, view, origin, pos, false, shift) {
                     self.interaction = Interaction::TextAt(p);
                 }
             }
@@ -1438,7 +1490,33 @@ impl PlexiApp {
                     *changed = true;
                 }
             }
-            Interaction::Rotate { center, start, orig, angle } => {
+            Interaction::Rotate { center, start, orig, angle, inner: true } => {
+                // Turn the picture inside its frame; it settles onto straight (and
+                // every quarter turn) when close.
+                let now = (p[1] - center[1]).atan2(p[0] - center[0]);
+                let a = plexi_core::tidy_angle(now - *start);
+                let mut sel = HashSet::new();
+                if let Some((i, Element::Image(img))) = orig.first() {
+                    let quarter = std::f32::consts::FRAC_PI_2;
+                    let mut turn = plexi_core::tidy_angle(img.inner_rotation + a);
+                    let snapped = (turn / quarter).round() * quarter;
+                    if (turn - snapped).abs() < 2f32.to_radians() {
+                        turn = plexi_core::tidy_angle(snapped);
+                    }
+                    *angle = plexi_core::tidy_angle(turn - img.inner_rotation);
+                    let mut e = Element::Image(img.clone());
+                    if let Element::Image(m) = &mut e {
+                        m.inner_rotation = turn;
+                    }
+                    e.renew_id();
+                    sel.insert(e.id());
+                    if let Some(slot) = self.page_mut(t).elements.get_mut(*i) {
+                        *slot = e;
+                    }
+                }
+                self.selection = sel;
+            }
+            Interaction::Rotate { center, start, orig, angle, .. } => {
                 let now = (p[1] - center[1]).atan2(p[0] - center[0]);
                 let mut a = plexi_core::tidy_angle(now - *start);
                 if shift {
@@ -2024,10 +2102,13 @@ impl PlexiApp {
             let full = view.rect_to_screen(origin, c.full);
             let shown = view.rect_to_screen(origin, c.shown);
             if let Some(tex) = asset.and_then(|a| self.textures.get(&a)).map(AssetTexture::first) {
-                let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                painter.image(tex.id(), full, whole, Color32::from_white_alpha(110));
-                let uv = |q: Pos2| pos2((q.x - full.left()) / full.width(), (q.y - full.top()) / full.height());
-                painter.image(tex.id(), shown, Rect::from_min_max(uv(shown.min), uv(shown.max)), Color32::WHITE);
+                // The whole (maybe turned) picture faintly, the part that will show fully.
+                let all = plexi_core::picture_polygon(c.picture, c.pivot, c.inner, c.full);
+                let part = plexi_core::picture_polygon(c.picture, c.pivot, c.inner, c.shown);
+                let faint = Color32::from_white_alpha(110);
+                let z = [0.0, 0.0];
+                painter.add(EShape::mesh(picture_mesh(tex.id(), &all, view, origin, z, 0.0, z, faint)));
+                painter.add(EShape::mesh(picture_mesh(tex.id(), &part, view, origin, z, 0.0, z, Color32::WHITE)));
             }
             painter.rect_stroke(full, 0.0, EStroke::new(1.0, accent.gamma_multiply(0.5)), StrokeKind::Outside);
             painter.rect_stroke(shown, 0.0, EStroke::new(1.5, accent), StrokeKind::Outside);

@@ -1843,6 +1843,7 @@ impl PlexiApp {
             crop: None,
             group: 0,
             rotation: 0.0,
+            inner_rotation: 0.0,
         }));
         if snip.is_none_or(|s| s.from != SnipFrom::Notebook) {
             page.elements.extend(self.doc.overlay.elements.iter().cloned());
@@ -3966,5 +3967,48 @@ mod tests {
             o[0],
             o2[0]
         );
+    }
+
+    #[test]
+    fn shift_turns_a_cropped_picture_inside_its_frame() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.insert_image(png(200, 100), None, &ctx);
+        let t = h.app.target();
+        let id = image_el(&h).id;
+        let i = h.app.doc.pages[0].find(id).unwrap();
+        if let Element::Image(img) = &mut h.app.doc.pages[0].elements[i] {
+            let f = img.full_rect();
+            img.set_crop(plexi_core::Rect::from_min_size([f.min[0] + 50.0, f.min[1] + 25.0], [100.0, 50.0]));
+        }
+        let framed = image_el(&h);
+        h.app.selection = [framed.id].into();
+        h.app.tool = Tool::Hand;
+        h.step(vec![]);
+        let (view, origin) = (h.app.view, h.app.canvas_origin);
+        let turn = |h: &mut Harness| {
+            let (handle, _) = h.app.rotate_handle(t, view, origin).expect("handle");
+            let c = view.to_screen(origin, h.app.selection_bounds(t).unwrap().center());
+            let d = handle.distance(c);
+            // A sixth of a turn clockwise.
+            let to = c + egui::vec2(d * 0.866, -d * 0.5);
+            let mid = c + egui::vec2(d * 0.5, -d * 0.866);
+            h.drag(PointerButton::Primary, &[(handle.x, handle.y), (mid.x, mid.y), (to.x, to.y)]);
+        };
+        h.set_shift(true);
+        turn(&mut h);
+        h.set_shift(false);
+        let inside = image_el(&h);
+        assert!((inside.inner_rotation - 60f32.to_radians()).abs() < 0.05, "{}", inside.inner_rotation);
+        assert_eq!(inside.rotation, 0.0, "the frame didn't turn");
+        assert_eq!((inside.pos, inside.size), (framed.pos, framed.size));
+        let svg = plexi_core::export::svg::page_svg(&h.app.doc.pages[0], &h.app.doc.assets, &Default::default());
+        assert!(svg.contains("overflow=\"hidden\"><image") && svg.contains("transform=\"rotate(6"), "{svg}");
+
+        // Without Shift the whole thing turns, picture and frame together.
+        turn(&mut h);
+        let whole = image_el(&h);
+        assert!((whole.rotation - 60f32.to_radians()).abs() < 0.05, "{}", whole.rotation);
+        assert_eq!(whole.inner_rotation, inside.inner_rotation);
     }
 }

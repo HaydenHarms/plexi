@@ -344,11 +344,16 @@ pub struct ImageEl {
     pub rotation: f32,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub group: u64,
+    /// The picture turned inside its frame (radians, clockwise, around the frame's
+    /// center), while the frame itself stays put: straightening a cropped photo. On top
+    /// of this the whole thing turns by `rotation`.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub inner_rotation: f32,
 }
 
 impl ImageEl {
     pub fn new(asset: String, pos: [f32; 2], size: [f32; 2]) -> Self {
-        Self { id: new_id(), asset, pos, size, locked: false, crop: None, rotation: 0.0, group: 0 }
+        Self { id: new_id(), asset, pos, size, locked: false, crop: None, rotation: 0.0, group: 0, inner_rotation: 0.0 }
     }
 
     /// The crop as `[left, top, right, bottom]` fractions, the whole picture if uncropped.
@@ -364,20 +369,60 @@ impl ImageEl {
         Rect::from_min_size([self.pos[0] - l * fw, self.pos[1] - t * fh], [fw, fh])
     }
 
-    /// Show only `shown` (page units, inside [`Self::full_rect`]) of the picture.
+    /// The middle of the frame: what the picture turns around inside it.
+    pub fn frame_center(&self) -> [f32; 2] {
+        [self.pos[0] + self.size[0] / 2.0, self.pos[1] + self.size[1] / 2.0]
+    }
+
+    /// The corners of the whole picture, turned inside the frame by
+    /// [`Self::inner_rotation`] (in the element's own, unturned frame).
+    pub fn picture_quad(&self) -> [[f32; 2]; 4] {
+        let f = self.full_rect();
+        let c = self.frame_center();
+        [f.min, [f.max[0], f.min[1]], f.max, [f.min[0], f.max[1]]].map(|p| rotate_point(p, c, self.inner_rotation))
+    }
+
+    /// What shows of the picture: the turned picture cut to the frame, as a polygon of
+    /// (position, texture coordinate) pairs in the element's own, unturned frame.
+    pub fn visible_polygon(&self) -> Vec<([f32; 2], [f32; 2])> {
+        let frame = Rect::from_min_size(self.pos, self.size);
+        picture_polygon(self.full_rect(), self.frame_center(), self.inner_rotation, frame)
+    }
+
+    /// Show only `shown` (page units) of the picture. Without a turn inside the frame it
+    /// must be inside [`Self::full_rect`]; with one, the picture stays exactly where it
+    /// is while the frame moves over it (corners past the picture show nothing).
     pub fn set_crop(&mut self, shown: Rect) {
-        let full = self.full_rect();
-        let fx = |x: f32| ((x - full.min[0]) / full.width().max(1e-4)).clamp(0.0, 1.0);
-        let fy = |y: f32| ((y - full.min[1]) / full.height().max(1e-4)).clamp(0.0, 1.0);
+        let mut full = self.full_rect();
+        let turned = self.inner_rotation != 0.0;
+        if turned {
+            // The picture turns around the frame's center, which moves with the frame:
+            // shift the unturned picture so the turned one doesn't move.
+            let c = self.frame_center();
+            let c2 = shown.center();
+            let d = [c2[0] - c[0], c2[1] - c[1]];
+            let back = rotate_point(d, [0.0, 0.0], -self.inner_rotation);
+            let t = [d[0] - back[0], d[1] - back[1]];
+            full =
+                Rect { min: [full.min[0] + t[0], full.min[1] + t[1]], max: [full.max[0] + t[0], full.max[1] + t[1]] };
+        }
+        let keep = |v: f32| if turned { v } else { v.clamp(0.0, 1.0) };
+        let fx = |x: f32| keep((x - full.min[0]) / full.width().max(1e-4));
+        let fy = |y: f32| keep((y - full.min[1]) / full.height().max(1e-4));
         let c = [fx(shown.min[0]), fy(shown.min[1]), fx(shown.max[0]), fy(shown.max[1])];
-        let whole = c[0] < 1e-3 && c[1] < 1e-3 && c[2] > 1.0 - 1e-3 && c[3] > 1.0 - 1e-3;
+        let whole = c[0].abs() < 1e-3 && c[1].abs() < 1e-3 && (c[2] - 1.0).abs() < 1e-3 && (c[3] - 1.0).abs() < 1e-3;
         self.crop = (!whole).then_some(c);
         self.pos = shown.min;
         self.size = [shown.width(), shown.height()];
     }
 
-    /// Show the whole picture again, at the scale it is shown now.
+    /// Show the whole picture again, at the scale it is shown now. A picture turned
+    /// inside its frame gets a frame around all of it.
     pub fn uncrop(&mut self) {
+        if self.inner_rotation != 0.0 {
+            self.set_crop(Rect::from_points(self.picture_quad()));
+            return;
+        }
         let full = self.full_rect();
         self.crop = None;
         self.pos = full.min;
@@ -618,6 +663,44 @@ impl Element {
         }
         self.renew_id();
     }
+}
+
+/// The picture `full` turned by `angle` around `pivot`, cut to `clip`: the polygon left,
+/// as (position, texture coordinate) pairs. Texture coordinates run 0..1 across `full`.
+pub fn picture_polygon(full: Rect, pivot: [f32; 2], angle: f32, clip: Rect) -> Vec<([f32; 2], [f32; 2])> {
+    let mut poly: Vec<[f32; 2]> = [full.min, [full.max[0], full.min[1]], full.max, [full.min[0], full.max[1]]]
+        .iter()
+        .map(|p| rotate_point(*p, pivot, angle))
+        .collect();
+    // Sutherland–Hodgman against each side of the clip rectangle.
+    let sides: [(usize, f32, bool); 4] =
+        [(0, clip.min[0], true), (0, clip.max[0], false), (1, clip.min[1], true), (1, clip.max[1], false)];
+    for (axis, edge, keep_above) in sides {
+        let inside = |p: &[f32; 2]| if keep_above { p[axis] >= edge } else { p[axis] <= edge };
+        let mut out = Vec::with_capacity(poly.len() + 2);
+        for i in 0..poly.len() {
+            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+            let (ia, ib) = (inside(&a), inside(&b));
+            if ia {
+                out.push(a);
+            }
+            if ia != ib {
+                let t = (edge - a[axis]) / (b[axis] - a[axis]);
+                out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+            }
+        }
+        poly = out;
+        if poly.is_empty() {
+            break;
+        }
+    }
+    let (w, h) = (full.width().max(1e-4), full.height().max(1e-4));
+    poly.into_iter()
+        .map(|p| {
+            let q = rotate_point(p, pivot, -angle);
+            (p, [(q[0] - full.min[0]) / w, (q[1] - full.min[1]) / h])
+        })
+        .collect()
 }
 
 /// An angle brought into -π..=π, and snapped to exactly 0 when it's within a hair of it
@@ -942,6 +1025,35 @@ mod tests {
         }
         let Element::Image(i) = &img else { unreachable!() };
         assert_eq!(i.rotation, 0.0);
+    }
+
+    #[test]
+    fn a_picture_turns_inside_its_frame_and_stays_put_when_recropped() {
+        let mut img = ImageEl::new("a.png".into(), [0.0, 0.0], [200.0, 100.0]);
+        img.set_crop(Rect::from_min_size([50.0, 25.0], [100.0, 50.0]));
+        img.inner_rotation = 0.3;
+        let before = img.picture_quad();
+        // The frame stays the frame; what shows is cut to it.
+        let poly = img.visible_polygon();
+        assert!(poly.len() >= 4);
+        assert!(poly.iter().all(|(p, _)| p[0] >= 49.99 && p[0] <= 150.01 && p[1] >= 24.99 && p[1] <= 75.01));
+        assert!(poly.iter().all(|(_, uv)| (-1e-3..=1.001).contains(&uv[0]) && (-1e-3..=1.001).contains(&uv[1])));
+        // Moving the frame doesn't move the turned picture under it.
+        img.set_crop(Rect::from_min_size([70.0, 20.0], [60.0, 40.0]));
+        let after = img.picture_quad();
+        for (a, b) in before.iter().zip(after) {
+            assert!((a[0] - b[0]).abs() < 1e-2 && (a[1] - b[1]).abs() < 1e-2, "{a:?} vs {b:?}");
+        }
+        // Uncropping frames all of the turned picture.
+        img.uncrop();
+        let quad = Rect::from_points(img.picture_quad());
+        assert!(
+            (quad.width() - img.size[0]).abs() < 0.1 && (quad.min[0] - img.pos[0]).abs() < 0.1,
+            "{quad:?} {:?} {:?} {:?}",
+            img.pos,
+            img.size,
+            img.crop
+        );
     }
 
     #[test]

@@ -213,13 +213,13 @@ fn unturned_svg(out: &mut String, el: &Element, assets: &Assets, opts: &RenderOp
             }
             out.push_str("</text>\n");
         }
-        Element::Image(img) if img.crop.is_some() => {
+        Element::Image(img) if img.crop.is_some() || img.inner_rotation != 0.0 => {
             // A nested viewport clips the whole picture to the shown part.
             if let Some(bytes) = assets.get(&img.asset) {
                 let full = img.full_rect();
                 let _ = writeln!(
                     out,
-                    "<svg x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" overflow=\"hidden\"><image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" xlink:href=\"{}\"/></svg>",
+                    "<svg x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" overflow=\"hidden\"><image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"{} preserveAspectRatio=\"none\" xlink:href=\"{}\"/></svg>",
                     n(img.pos[0]),
                     n(img.pos[1]),
                     n(img.size[0]),
@@ -228,6 +228,16 @@ fn unturned_svg(out: &mut String, el: &Element, assets: &Assets, opts: &RenderOp
                     n(full.min[1] - img.pos[1]),
                     n(full.width()),
                     n(full.height()),
+                    if img.inner_rotation != 0.0 {
+                        format!(
+                            " transform=\"rotate({} {} {})\"",
+                            n(img.inner_rotation.to_degrees()),
+                            n(img.size[0] / 2.0),
+                            n(img.size[1] / 2.0)
+                        )
+                    } else {
+                        String::new()
+                    },
                     data_uri(bytes)
                 );
             }
