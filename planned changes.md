@@ -1,3 +1,3 @@
 - [ ] Rework selected area printing, allow just for a button in the export menu that says select area and then allow the selection to happen from there with a rectangle selector.
 - [ ] For all menus make the hitbox for the x bigger
-- [ ] 
+- [ ] The lasso tool needs to select the things within its borders even if it doesn't surround the whole object
