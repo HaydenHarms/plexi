@@ -657,6 +657,31 @@ fn record_button(app: &mut PlexiApp, ui: &mut Ui) {
     ctx.request_repaint_after(std::time::Duration::from_millis(250));
 }
 
+/// A bigger target for a window's close X than egui's own, which is only as big as the
+/// X: a click anywhere in a 30-point square around it closes the window. `window` is
+/// the rect the window was shown at; `name` keeps its target apart from other windows'.
+pub fn bigger_close(ctx: &Context, name: &str, window: Option<Rect>, open: &mut bool) {
+    let Some(w) = window else { return };
+    let style = ctx.global_style();
+    let m = style.spacing.window_margin;
+    let h = ctx.fonts_mut(|f| f.row_height(&egui::TextStyle::Heading.resolve(&style)));
+    let center = pos2(w.right() - m.right as f32 - h / 2.0, w.top() + m.top as f32 + h / 2.0);
+    let r = Rect::from_center_size(center, vec2(30.0, 30.0));
+    egui::Area::new(Id::unique(("bigger-close", name))).fixed_pos(r.min).order(Order::Foreground).show(ctx, |ui| {
+        let (rect, resp) = ui.allocate_exact_size(r.size(), Sense::click());
+        if resp.hovered() {
+            let v = ui.style().visuals.widgets.hovered;
+            ui.painter().circle_filled(rect.center(), 13.0, v.weak_bg_fill);
+            let x = Rect::from_center_size(rect.center(), vec2(9.0, 9.0));
+            ui.painter().line_segment([x.left_top(), x.right_bottom()], v.fg_stroke);
+            ui.painter().line_segment([x.right_top(), x.left_bottom()], v.fg_stroke);
+        }
+        if resp.on_hover_text("Close").clicked() {
+            *open = false;
+        }
+    });
+}
+
 fn accent_button(ui: &mut Ui, icon: Icon, text: &str) -> Response {
     let galley = ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(14.0), Color32::WHITE);
     let size = vec2(galley.size().x + 44.0, 34.0);
@@ -1482,6 +1507,21 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
     if app.export.is_none() {
         return;
     }
+    if app.picking_area {
+        // The dialog steps aside while a box is dragged on the canvas.
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            app.picking_area = false;
+        }
+        egui::Area::new(Id::unique("pick-area-hint"))
+            .anchor(Align2::CENTER_TOP, vec2(0.0, 70.0))
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                pill(ui).show(ui, |ui| {
+                    ui.label("Drag a box around the part to print or export  ·  Esc to cancel");
+                });
+            });
+        return;
+    }
     refresh_preview(app, ctx);
     let fixed_page = app.doc.pages[app.page].size.dims().is_some();
     let has_pages = app.doc.pages.len() > 1;
@@ -1490,7 +1530,8 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
     let mut open = true;
     let mut go = false;
     let mut print = false;
-    egui::Window::new("Export")
+    let mut pick = false;
+    let shown = egui::Window::new("Export")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -1607,11 +1648,20 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                                 let whole = if fixed_page { "Whole page" } else { "Everything drawn" };
                                 ui.radio_value(&mut dlg.area, Area::Page, whole);
                                 ui.radio_value(&mut dlg.area, Area::Content, "Trim to the drawing");
-                                if dlg.region.is_some() {
-                                    ui.radio_value(&mut dlg.area, Area::Region, "Selected part").on_hover_text(
-                                        "Just the box around what you selected, wherever the sheet outlines are",
-                                    );
-                                }
+                                ui.horizontal(|ui| {
+                                    if dlg.region.is_some() {
+                                        ui.radio_value(&mut dlg.area, Area::Region, "Selected area")
+                                            .on_hover_text("Just this box, wherever the sheet outlines are");
+                                    }
+                                    let label = if dlg.region.is_some() { "Change…" } else { "Select area…" };
+                                    if ui
+                                        .button(label)
+                                        .on_hover_text("Drag a box on the canvas around the part to print or export")
+                                        .clicked()
+                                    {
+                                        pick = true;
+                                    }
+                                });
                             });
                             ui.end_row();
 
@@ -1723,6 +1773,10 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                 });
             });
         });
+    bigger_close(ctx, "export", shown.map(|r| r.response.rect), &mut open);
+    if pick {
+        app.picking_area = true;
+    }
     if !open {
         app.export = None;
     } else if go {
@@ -1862,7 +1916,7 @@ fn settings_window(app: &mut PlexiApp, ctx: &Context) {
     let mut open = app.settings_open;
     let mut check_now = false;
     let max_h = (ctx.content_rect().height() - 140.0).max(200.0);
-    egui::Window::new("Settings")
+    let shown = egui::Window::new("Settings")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -1941,6 +1995,7 @@ fn settings_window(app: &mut PlexiApp, ctx: &Context) {
             });
             ui.weak(format!("Plexi {}", env!("CARGO_PKG_VERSION")));
         });
+    bigger_close(ctx, "settings", shown.map(|r| r.response.rect), &mut open);
     if check_now {
         app.check_for_updates(ctx, true);
     }
@@ -1952,47 +2007,49 @@ fn settings_window(app: &mut PlexiApp, ctx: &Context) {
 
 fn help_window(app: &mut PlexiApp, ctx: &Context) {
     let mut open = app.help_open;
-    egui::Window::new("Keyboard shortcuts").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-        let rows: &[(&str, String)] = &[
-            ("Draw on screen / click-through", app.config.hotkey_draw.clone()),
-            ("Clear screen ink", app.config.hotkey_clear.clone()),
-            ("Back to notebook", app.config.hotkey_notebook.clone()),
-            ("Snip an area of the screen", app.config.hotkey_snip.clone()),
-            ("Record to video: the canvas, or the whole screen while drawing on it", "Ctrl+Shift+R".into()),
-            ("Command palette", "Ctrl+K".into()),
-            ("Pen · Highlighter · Eraser", "P · H · E".into()),
-            ("Select (lasso) · Rectangle select · Hand · Text", "S · M · G · T".into()),
-            ("Snapshot an area of the page → clipboard", "Snapshot tool (in the select tools menu)".into()),
-            ("Line · Arrow · Rect · Ellipse", "L · A · R · O".into()),
-            ("Colors", "1 – 9".into()),
-            ("Thinner / thicker", "[ · ]".into()),
-            ("Erase with any tool", "Middle-drag (or pen barrel button)".into()),
-            ("Menu: lock image, arrange, paper, delete page", "Right-click (no drag)".into()),
-            ("Resize an image", "Select it, drag a corner (Shift: keep proportions)".into()),
-            ("Set a text box's wrap width", "Drag the handle on its left or right side".into()),
-            ("Crop an image", "Right-click it → Crop image".into()),
-            ("Edit a text box", "Double-click it (Select tool)".into()),
-            ("Pan", "Right-drag · Space+drag · Shift+scroll · two fingers".into()),
-            ("Zoom", "Scroll wheel · pinch · Ctrl+= / Ctrl+-".into()),
-            ("Fit page", "Ctrl+0".into()),
-            ("Undo · Redo", "Ctrl+Z · Ctrl+Y".into()),
-            ("New page · Next · Previous", "Ctrl+Enter · PgDn · PgUp".into()),
-            ("Select all · Duplicate · Delete", "Ctrl+A · Ctrl+D · Del".into()),
-            ("Add to the selection (lasso or rectangle)", "hold Shift".into()),
-            ("Straight lines, squares", "hold Shift".into()),
-            ("Copy selection · paste it back", "Ctrl+C · Ctrl+V".into()),
-            ("Paste image or text", "Ctrl+V".into()),
-            ("Save · Open · Export and print", "Ctrl+S · Ctrl+O · Ctrl+E (or Ctrl+P)".into()),
-            ("On screen: click-through · clear · snapshot", "Esc · C · Ctrl+Shift+C".into()),
-        ];
-        egui::Grid::new("keys").num_columns(2).spacing(vec2(24.0, 6.0)).striped(true).show(ui, |ui| {
-            for (what, keys) in rows {
-                ui.label(*what);
-                ui.label(egui::RichText::new(keys).monospace());
-                ui.end_row();
-            }
+    let shown =
+        egui::Window::new("Keyboard shortcuts").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            let rows: &[(&str, String)] = &[
+                ("Draw on screen / click-through", app.config.hotkey_draw.clone()),
+                ("Clear screen ink", app.config.hotkey_clear.clone()),
+                ("Back to notebook", app.config.hotkey_notebook.clone()),
+                ("Snip an area of the screen", app.config.hotkey_snip.clone()),
+                ("Record to video: the canvas, or the whole screen while drawing on it", "Ctrl+Shift+R".into()),
+                ("Command palette", "Ctrl+K".into()),
+                ("Pen · Highlighter · Eraser", "P · H · E".into()),
+                ("Select (lasso) · Rectangle select · Hand · Text", "S · M · G · T".into()),
+                ("Snapshot an area of the page → clipboard", "Snapshot tool (in the select tools menu)".into()),
+                ("Line · Arrow · Rect · Ellipse", "L · A · R · O".into()),
+                ("Colors", "1 – 9".into()),
+                ("Thinner / thicker", "[ · ]".into()),
+                ("Erase with any tool", "Middle-drag (or pen barrel button)".into()),
+                ("Menu: lock image, arrange, paper, delete page", "Right-click (no drag)".into()),
+                ("Resize an image", "Select it, drag a corner (Shift: keep proportions)".into()),
+                ("Set a text box's wrap width", "Drag the handle on its left or right side".into()),
+                ("Crop an image", "Right-click it → Crop image".into()),
+                ("Edit a text box", "Double-click it (Select tool)".into()),
+                ("Pan", "Right-drag · Space+drag · Shift+scroll · two fingers".into()),
+                ("Zoom", "Scroll wheel · pinch · Ctrl+= / Ctrl+-".into()),
+                ("Fit page", "Ctrl+0".into()),
+                ("Undo · Redo", "Ctrl+Z · Ctrl+Y".into()),
+                ("New page · Next · Previous", "Ctrl+Enter · PgDn · PgUp".into()),
+                ("Select all · Duplicate · Delete", "Ctrl+A · Ctrl+D · Del".into()),
+                ("Add to the selection (lasso or rectangle)", "hold Shift".into()),
+                ("Straight lines, squares", "hold Shift".into()),
+                ("Copy selection · paste it back", "Ctrl+C · Ctrl+V".into()),
+                ("Paste image or text", "Ctrl+V".into()),
+                ("Save · Open · Export and print", "Ctrl+S · Ctrl+O · Ctrl+E (or Ctrl+P)".into()),
+                ("On screen: click-through · clear · snapshot", "Esc · C · Ctrl+Shift+C".into()),
+            ];
+            egui::Grid::new("keys").num_columns(2).spacing(vec2(24.0, 6.0)).striped(true).show(ui, |ui| {
+                for (what, keys) in rows {
+                    ui.label(*what);
+                    ui.label(egui::RichText::new(keys).monospace());
+                    ui.end_row();
+                }
+            });
         });
-    });
+    bigger_close(ctx, "help", shown.map(|r| r.response.rect), &mut open);
     app.help_open = open;
 }
 

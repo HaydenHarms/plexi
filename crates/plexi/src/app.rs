@@ -54,7 +54,7 @@ impl Tool {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SnapshotAction {
     /// Desktop plus ink onto the clipboard.
     Copy,
@@ -65,6 +65,9 @@ pub enum SnapshotAction {
     /// The area picked with [`Snip`]: onto the clipboard, and into the notebook when the
     /// snip started there.
     Snip,
+    /// The snapshot tool's box on screen (in points from the overlay's top-left):
+    /// desktop plus ink in that box onto the clipboard.
+    Area(plexi_core::Rect),
 }
 
 /// Where to go once a snip is done (or cancelled).
@@ -148,8 +151,9 @@ pub struct ExportDialog {
     /// Export only the output pages listed in `page_list` (e.g. "1, 3, 5-7").
     pub pick_pages: bool,
     pub page_list: String,
-    /// The bounds of what was selected when the dialog opened, for [`Area::Region`]:
-    /// printing or exporting a section of the canvas regardless of sheet outlines.
+    /// The area picked with "Select area…" (or the snapshot just taken), for
+    /// [`Area::Region`]: printing or exporting a section of the canvas regardless of
+    /// sheet outlines.
     pub region: Option<plexi_core::Rect>,
     pub preview: crate::ui::Preview,
 }
@@ -301,6 +305,12 @@ pub struct PlexiApp {
     pub edit_guide: Option<(u64, egui::Rect)>,
     /// An area the snapshot tool picked, to copy to the clipboard this frame.
     pub snapshot_request: Option<(Target, plexi_core::Rect)>,
+    /// The export dialog's "Select area…" is waiting for a box to be dragged on the
+    /// canvas; the dialog is hidden meanwhile.
+    pub picking_area: bool,
+    /// The last snapshot tool box, and where it was taken: offered as the export
+    /// dialog's area.
+    pub last_snapshot: Option<(Target, plexi_core::Rect)>,
     /// The recording in progress, if any.
     pub recording: Option<crate::record::Recording>,
     /// Plexi's window is currently left out of screen captures for the recording.
@@ -376,6 +386,8 @@ impl PlexiApp {
             canvas_origin: egui::Pos2::ZERO,
             edit_guide: None,
             snapshot_request: None,
+            picking_area: false,
+            last_snapshot: None,
             recording: None,
             capture_excluded: false,
             cursor_trail: Default::default(),
@@ -1199,6 +1211,11 @@ impl PlexiApp {
     /// The snapshot tool: copy `area` of target `t` to the system clipboard as a
     /// picture, at the size it shows on screen (never below the screen's own pixels).
     pub fn copy_area(&mut self, ctx: &Context, t: Target, area: plexi_core::Rect) {
+        if t == Target::Overlay && self.is_overlay() {
+            // On screen the picture is the desktop under the box, with the ink on top.
+            self.request_snapshot(SnapshotAction::Area(area));
+            return;
+        }
         let ppp = ctx.pixels_per_point();
         let scale = (ppp * self.view_for(t).zoom).max(ppp);
         let paper = matches!(t, Target::Page(_));
@@ -1787,6 +1804,19 @@ impl PlexiApp {
                     self.toast("Snip copied to the clipboard");
                 }
             }
+            SnapshotAction::Area(area) => {
+                let opts = RenderOptions { scale: ppp, background: false, ..Default::default() };
+                let img = plexi_core::export::raster::area_rgba(&page, &self.doc.assets, &opts, area);
+                self.doc.prune_assets();
+                match img {
+                    Ok(img) => {
+                        let size = [img.width() as usize, img.height() as usize];
+                        ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()));
+                        self.toast("Snapshot copied");
+                    }
+                    Err(e) => self.toast_error(format!("Couldn't take the snapshot: {e}")),
+                }
+            }
             SnapshotAction::ToPage => {
                 self.checkpoint_pages();
                 self.doc.pages.push(page);
@@ -2074,8 +2104,10 @@ impl PlexiApp {
         // An infinite canvas prints on the sheets its guides show; a fixed page as itself.
         let infinite = !self.is_overlay() && self.doc.pages[self.page].size.dims().is_none();
         let paper = if infinite { PaperChoice::Preset(self.config.sheet_paper) } else { PaperChoice::Fit };
-        // With something selected, start on just that part.
-        let region = self.selection_bounds(self.target());
+        // A snapshot just taken here is the area you'll likely want; otherwise pick one
+        // with "Select area…".
+        let region = self.last_snapshot.filter(|(t, _)| *t == self.target()).map(|(_, r)| r);
+        self.picking_area = false;
         self.export = Some(ExportDialog {
             format: ExportFormat::Pdf,
             scope,
@@ -2092,6 +2124,18 @@ impl PlexiApp {
             region,
             preview: Default::default(),
         });
+    }
+
+    /// "Select area…" finished: export just `area` of target `t`.
+    pub fn set_export_area(&mut self, t: Target, area: plexi_core::Rect) {
+        if let Some(dlg) = &mut self.export {
+            dlg.region = Some(area);
+            dlg.area = Area::Region;
+            dlg.scope = match t {
+                Target::Overlay => ExportScope::ScreenInk,
+                Target::Page(_) => ExportScope::CurrentPage,
+            };
+        }
     }
 
     fn update_title(&mut self, ctx: &Context) {
@@ -2456,34 +2500,160 @@ mod tests {
     }
 
     #[test]
-    fn exporting_with_something_selected_covers_just_that_part() {
+    fn export_prints_an_area_picked_from_the_dialog_or_the_last_snapshot() {
         let mut h = Harness::new();
         h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
         h.drag(PointerButton::Primary, &line(300.0, 500.0, 600.0));
+
+        // A selection no longer decides the area: the dialog starts on the whole page.
         h.app.tool = Tool::RectSelect;
         h.drag(PointerButton::Primary, &[(250.0, 250.0), (550.0, 350.0)]);
-        let bounds = h.app.selection_bounds(h.app.target()).expect("the first stroke");
-        h.app.open_export_dialog();
-        let dlg = h.app.export.as_mut().expect("the dialog");
-        assert_eq!(dlg.area, Area::Region, "starts on the selected part");
-        dlg.scope = ExportScope::AllPages;
-        h.step(vec![]);
-        let dlg = h.app.export.as_ref().unwrap();
-        assert_eq!(dlg.scope, ExportScope::CurrentPage, "a selected part is on one page");
-        assert_eq!(dlg.preview.frames.len(), 1);
-        // On Letter paper the sheet is bigger than the part; everything past the part's
-        // edge is clipped off.
-        let shown = dlg.preview.frames[0].1.clip.expect("clipped to the part");
-        assert!(shown.contains(bounds.min) && shown.contains(bounds.max));
-        let other = h.elements()[1].bounds().center();
-        assert!(!shown.contains(other), "the other stroke is left out");
-
-        // Nothing selected: no such option.
-        h.app.export = None;
-        h.app.selection.clear();
         h.app.open_export_dialog();
         assert_eq!(h.app.export.as_ref().unwrap().area, Area::Page);
         assert!(h.app.export.as_ref().unwrap().region.is_none());
+
+        // "Select area…": the dialog steps aside, a box dragged on the canvas (whatever
+        // the tool) becomes the area, and the dialog comes back on it.
+        h.app.selection.clear();
+        h.app.tool = Tool::Pen;
+        h.app.picking_area = true;
+        h.step(vec![]);
+        h.drag(PointerButton::Primary, &[(250.0, 250.0), (400.0, 300.0), (550.0, 350.0)]);
+        assert!(!h.app.picking_area);
+        assert_eq!(h.elements().len(), 2, "nothing was drawn");
+        let dlg = h.app.export.as_ref().unwrap();
+        assert_eq!(dlg.area, Area::Region);
+        let region = dlg.region.expect("the picked box");
+        let first = h.elements()[0].bounds().center();
+        let other = h.elements()[1].bounds().center();
+        assert!(region.contains(first) && !region.contains(other));
+        h.step(vec![]);
+        // On paper bigger than the box, everything past its edge is clipped off.
+        let shown = h.app.export.as_ref().unwrap().preview.frames[0].1.clip.expect("clipped to it");
+        assert!(!shown.contains(other));
+
+        // Esc while picking leaves the area as it was.
+        h.app.picking_area = true;
+        h.step(vec![Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert!(!h.app.picking_area);
+        assert_eq!(h.app.export.as_ref().unwrap().region, Some(region));
+
+        // A snapshot just taken is the area the dialog starts on.
+        h.app.export = None;
+        h.app.tool = Tool::Snapshot;
+        h.drag(PointerButton::Primary, &[(250.0, 550.0), (550.0, 650.0)]);
+        h.app.open_export_dialog();
+        let dlg = h.app.export.as_ref().unwrap();
+        assert_eq!(dlg.area, Area::Region);
+        assert!(dlg.region.is_some_and(|r| r.contains(other) && !r.contains(first)));
+    }
+
+    #[test]
+    fn the_lasso_and_box_pick_up_what_they_touch() {
+        let mut h = Harness::new();
+        // A long stroke with only its ends sampled... (simplification keeps a straight
+        // line to two points) and a short one.
+        h.drag(PointerButton::Primary, &line(100.0, 700.0, 300.0));
+        h.drag(PointerButton::Primary, &line(100.0, 200.0, 500.0));
+        h.app.tool = Tool::RectSelect;
+        // A box across the middle of the long stroke only: none of its ends inside.
+        h.drag(PointerButton::Primary, &[(350.0, 250.0), (450.0, 350.0)]);
+        assert_eq!(h.app.selection.len(), 1, "the box crossed the long stroke");
+        // A lasso around just the tip of the short one.
+        h.app.tool = Tool::Lasso;
+        h.app.selection.clear();
+        h.drag(
+            PointerButton::Primary,
+            &[(180.0, 470.0), (240.0, 470.0), (240.0, 530.0), (180.0, 530.0), (180.0, 475.0)],
+        );
+        assert_eq!(h.app.selection.len(), 1, "touching its tip is enough");
+        // Missing everything selects nothing.
+        h.drag(
+            PointerButton::Primary,
+            &[(600.0, 600.0), (650.0, 600.0), (650.0, 650.0), (600.0, 650.0), (600.0, 605.0)],
+        );
+        assert!(h.app.selection.is_empty());
+    }
+
+    #[test]
+    fn dragging_a_selection_to_the_edge_scrolls_the_page() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(300.0, 400.0, 300.0));
+        h.app.tool = Tool::Hand;
+        h.click(350.0, 300.0);
+        assert_eq!(h.app.selection.len(), 1);
+        let before = h.elements()[0].bounds().center();
+        let offset = h.app.view.offset;
+        // Hold the stroke right at the canvas's right edge for a while.
+        let m = Modifiers::NONE;
+        h.step(vec![Event::PointerMoved(pos2(350.0, 300.0))]);
+        h.step(vec![Event::PointerButton {
+            pos: pos2(350.0, 300.0),
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: m,
+        }]);
+        h.step(vec![Event::PointerMoved(pos2(990.0, 300.0))]);
+        for _ in 0..20 {
+            h.step(vec![]);
+        }
+        h.step(vec![Event::PointerButton {
+            pos: pos2(990.0, 300.0),
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: m,
+        }]);
+        h.step(vec![]);
+        assert!(h.app.view.offset.x < offset.x - 50.0, "the page scrolled: {:?} -> {:?}", offset, h.app.view.offset);
+        let after = h.elements()[0].bounds().center();
+        let pointer_moved = (990.0 - 350.0) / h.app.view.zoom;
+        assert!(after[0] - before[0] > pointer_moved + 50.0, "carried past where the pointer alone took it");
+        // The stroke is still under the pointer.
+        let under = h.app.view.to_page(h.app.canvas_origin, pos2(990.0, 300.0));
+        assert!((after[0] - under[0]).abs() < 60.0, "{after:?} vs {under:?}");
+    }
+
+    #[test]
+    fn the_snapshot_tool_on_screen_takes_the_desktop_too() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.enter_overlay(&ctx, false);
+        for _ in 0..4 {
+            h.step(vec![]);
+        }
+        h.app.tool = Tool::Snapshot;
+        h.drag(PointerButton::Primary, &[(100.0, 100.0), (300.0, 250.0)]);
+        let Mode::Overlay(o) = &mut h.app.mode else { panic!("on screen") };
+        let Some((SnapshotAction::Area(area), _)) = o.snapshot else { panic!("a screenshot is on its way") };
+        assert_eq!((area.width(), area.height()), (200.0, 150.0));
+        // Stand in for the screenshot instead of capturing the real screen.
+        o.snapshot = None;
+        let shot = image::RgbaImage::from_pixel(1000, 800, image::Rgba([10, 120, 200, 255]));
+        h.app.finish_snapshot(&ctx, SnapshotAction::Area(area), shot);
+        assert!(h.app.toast.as_ref().is_some_and(|t| t.text == "Snapshot copied" && !t.error));
+    }
+
+    #[test]
+    fn windows_close_from_anywhere_near_their_x() {
+        let mut h = Harness::new();
+        h.app.settings_open = true;
+        h.step(vec![]);
+        h.step(vec![]);
+        let target = h
+            .ctx
+            .memory(|m| m.area_rect(egui::Id::unique(("bigger-close", "settings"))))
+            .expect("the close target was placed");
+        assert!(target.width() >= 30.0);
+        // A corner of the target: well outside egui's own X, which is only as big as the X.
+        let at = target.min + egui::vec2(3.0, 3.0);
+        h.click(at.x, at.y);
+        assert!(!h.app.settings_open, "closed");
     }
 
     #[test]

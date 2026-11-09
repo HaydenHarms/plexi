@@ -221,7 +221,7 @@ pub fn window(app: &mut PlexiApp, ctx: &Context) {
     let mut open = true;
     let mut clear_all = false;
     let mut save_now = false;
-    egui::Window::new("My handwriting")
+    let shown = egui::Window::new("My handwriting")
         .open(&mut open)
         .default_width(620.0)
         .pivot(egui::Align2::CENTER_CENTER)
@@ -258,6 +258,7 @@ pub fn window(app: &mut PlexiApp, ctx: &Context) {
                 }
             });
         });
+    crate::ui::bigger_close(ctx, "handwriting", shown.map(|r| r.response.rect), &mut open);
     if clear_all && !app.handwriting.samples.is_empty() {
         app.handwriting.checkpoint();
         app.handwriting.samples = Samples::default();

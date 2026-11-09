@@ -132,10 +132,12 @@ pub enum Interaction {
         changed: bool,
         reedit: bool,
     },
-    /// The snapshot tool's box, from where the drag started to where it is now.
+    /// The snapshot tool's box, from where the drag started to where it is now. `pick`
+    /// is set when it's picking the area for the export dialog instead.
     Snapshot {
         start: [f32; 2],
         end: [f32; 2],
+        pick: bool,
     },
 }
 
@@ -289,6 +291,21 @@ fn to_egui_mesh(m: &ink::Mesh, view: View, origin: Pos2, delta: [f32; 2], color:
         .map(|v| Vertex { pos: base + vec2(v[0] + delta[0], v[1] + delta[1]) * view.zoom, uv: WHITE_UV, color })
         .collect();
     egui::Mesh { indices: m.indices.clone(), vertices, texture_id: egui::TextureId::default() }
+}
+
+/// Whether the polyline `path` has a point inside `poly` or crosses one of its edges.
+fn path_touches_polygon(path: &[[f32; 2]], poly: &[[f32; 2]]) -> bool {
+    if path.iter().any(|p| point_in_polygon(*p, poly)) {
+        return true;
+    }
+    let cross = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    let meets = |p1: [f32; 2], p2: [f32; 2], q1: [f32; 2], q2: [f32; 2]| {
+        let (d1, d2) = (cross(q1, q2, p1), cross(q1, q2, p2));
+        let (d3, d4) = (cross(p1, p2, q1), cross(p1, p2, q2));
+        d1 * d2 < 0.0 && d3 * d4 < 0.0
+    };
+    let n = poly.len();
+    path.windows(2).any(|s| (0..n).any(|k| meets(s[0], s[1], poly[k], poly[(k + 1) % n])))
 }
 
 /// Snap with Shift: lines to 15° steps, boxes to squares.
@@ -960,6 +977,13 @@ impl PlexiApp {
             }
             return;
         }
+        if self.picking_area {
+            // The export dialog's "Select area…": a box, whatever the tool.
+            if button == PointerButton::Primary {
+                self.interaction = Interaction::Snapshot { start: p, end: p, pick: true };
+            }
+            return;
+        }
         let notebook = matches!(self.mode, Mode::Notebook);
         if notebook && button == PointerButton::Primary && space {
             self.interaction = Interaction::Pan { last: pos };
@@ -1058,7 +1082,7 @@ impl PlexiApp {
                     self.interaction = Interaction::TextAt(p);
                 }
             }
-            Tool::Snapshot => self.interaction = Interaction::Snapshot { start: p, end: p },
+            Tool::Snapshot => self.interaction = Interaction::Snapshot { start: p, end: p, pick: false },
             Tool::Shape(kind) => self.interaction = Interaction::Shape { kind, start: p, end: p },
         }
     }
@@ -1234,12 +1258,21 @@ impl PlexiApp {
                     self.begin_text_edit(t, id);
                 }
             }
-            Interaction::Snapshot { start, end } => {
+            Interaction::Snapshot { start, end, pick } => {
                 let area = plexi_core::Rect {
                     min: [start[0].min(end[0]), start[1].min(end[1])],
                     max: [start[0].max(end[0]), start[1].max(end[1])],
                 };
-                if area.width() * view.zoom > 3.0 && area.height() * view.zoom > 3.0 {
+                let big_enough = area.width() * view.zoom > 3.0 && area.height() * view.zoom > 3.0;
+                if pick {
+                    self.picking_area = false;
+                    if big_enough {
+                        self.set_export_area(t, area);
+                    }
+                } else if big_enough {
+                    // Kept for the export dialog: a snapshot just taken is what you'll
+                    // likely want to print.
+                    self.last_snapshot = Some((t, area));
                     self.snapshot_request = Some((t, area));
                 }
             }
@@ -1273,12 +1306,20 @@ impl PlexiApp {
                     .elements
                     .iter()
                     .filter(|e| !e.locked())
+                    // Anything the lasso (or box) touches, not only what it fully
+                    // surrounds.
                     .filter(|e| match e {
                         Element::Stroke(s) => {
-                            let inside = s.points.iter().filter(|q| point_in_polygon(q.pos(), &pts)).count();
-                            inside * 2 >= s.points.len().max(1)
+                            let line: Vec<[f32; 2]> = s.points.iter().map(|q| q.pos()).collect();
+                            path_touches_polygon(&line, &pts)
                         }
-                        other => point_in_polygon(other.bounds().center(), &pts),
+                        other => {
+                            let b = other.bounds();
+                            let corners = [b.min, [b.max[0], b.min[1]], b.max, [b.min[0], b.max[1]], b.min];
+                            path_touches_polygon(&corners, &pts)
+                                || point_in_polygon(b.center(), &pts)
+                                || pts.iter().any(|p| b.contains(*p))
+                        }
                     })
                     .map(Element::id)
                     .collect();
@@ -1319,6 +1360,42 @@ impl PlexiApp {
                 }
             }
         }
+    }
+
+    /// Dragging a selection, a lasso or a box near the canvas edge scrolls the page that
+    /// way, faster the closer to (or further past) the edge, so things off screen can be
+    /// reached. The drag is re-applied after each step so what's held stays under the
+    /// pointer.
+    fn edge_push(&mut self, ctx: &egui::Context, rect: Rect, t: Target, shift: bool) {
+        const EDGE: f32 = 36.0;
+        const SPEED: f32 = 900.0; // points a second at the very edge
+        if !matches!(t, Target::Page(_))
+            || !matches!(
+                self.interaction,
+                Interaction::Move { .. } | Interaction::Lasso { .. } | Interaction::Snapshot { .. }
+            )
+        {
+            return;
+        }
+        let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else { return };
+        let inner = rect.shrink(EDGE);
+        let push = |p: f32, lo: f32, hi: f32| {
+            if p < lo {
+                -((lo - p) / EDGE).min(1.5)
+            } else if p > hi {
+                ((p - hi) / EDGE).min(1.5)
+            } else {
+                0.0
+            }
+        };
+        let dir = vec2(push(pos.x, inner.left(), inner.right()), push(pos.y, inner.top(), inner.bottom()));
+        if dir == Vec2::ZERO {
+            return;
+        }
+        let (dt, now) = ctx.input(|i| (i.stable_dt.min(0.05), i.time));
+        self.view.offset -= dir * SPEED * dt;
+        self.drag(t, self.view_for(t), rect.min, pos, now, shift);
+        ctx.request_repaint();
     }
 
     fn tool_input(&mut self, ui: &Ui, rect: Rect, t: Target) {
@@ -1367,6 +1444,7 @@ impl PlexiApp {
             }
         }
         self.last_sample_time = now;
+        self.edge_push(&ctx, rect, t, mods.shift);
         if let Some((t, area)) = self.snapshot_request.take() {
             self.copy_area(&ctx, t, area);
         }
@@ -1437,6 +1515,10 @@ impl PlexiApp {
         };
         if let Some(icon) = resize {
             ui.ctx().set_cursor_icon(icon);
+            return;
+        }
+        if self.picking_area {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             return;
         }
         match self.tool {
@@ -1586,7 +1668,7 @@ impl PlexiApp {
                 };
                 paint_shape(&painter, &s, view, origin, [0.0, 0.0]);
             }
-            Interaction::Snapshot { start, end } => {
+            Interaction::Snapshot { start, end, .. } => {
                 let r = Rect::from_two_pos(view.to_screen(origin, *start), view.to_screen(origin, *end));
                 painter.rect_filled(r, 0.0, accent.gamma_multiply(0.08));
                 let c = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];

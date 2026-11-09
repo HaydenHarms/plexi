@@ -629,6 +629,38 @@ fn preview_tools() {
 }
 
 #[test]
+#[ignore = "renders stills of the bigger close X, and picking an area to export"]
+fn preview_round_three() {
+    let out = std::env::temp_dir().join("plexi-preview-three");
+    let mut r = Recorder::new(&out);
+    r.wait(0.2);
+    r.drag(PointerButton::Primary, &curve(&[(200.0, 300.0), (330.0, 240.0), (460.0, 320.0)], 10), 2);
+    r.drag(PointerButton::Primary, &curve(&[(560.0, 420.0), (690.0, 360.0), (820.0, 440.0)], 10), 2);
+    r.app.settings_open = true;
+    r.wait(0.3);
+    let target = r.ctx.memory(|m| m.area_rect(egui::Id::unique(("bigger-close", "settings")))).unwrap();
+    r.move_to((target.left() + 4.0, target.bottom() - 4.0), 0.2);
+    r.snapshot("close-hover");
+    r.click((target.left() + 4.0, target.bottom() - 4.0));
+    r.wait(0.2);
+    let ctx = r.ctx.clone();
+    r.app.open_export_dialog();
+    r.wait(0.5);
+    r.snapshot("export-dialog");
+    r.app.picking_area = true;
+    r.wait(0.2);
+    r.move_to((170.0, 210.0), 0.2);
+    r.button(PointerButton::Primary, true);
+    r.move_to((490.0, 350.0), 0.3);
+    r.snapshot("picking");
+    r.button(PointerButton::Primary, false);
+    r.wait(0.8);
+    r.snapshot("export-area");
+    let _ = ctx;
+    r.finish();
+}
+
+#[test]
 #[ignore = "renders stills of the cursor trail while recording, and its settings"]
 fn preview_trail() {
     let out = std::env::temp_dir().join("plexi-preview-trail");
