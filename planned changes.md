@@ -7,3 +7,4 @@
 - [ ] Add rotation of shapes, text, images, etc.
 - [ ] When selecting multiple, show each individual selection rather than expanding one selection box, thanks
 - [ ] Saved message text stacks weird
+- [ ] F2 to edit currently selected text box
