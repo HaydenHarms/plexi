@@ -117,6 +117,21 @@ pub enum Interaction {
         changed: bool,
         reedit: bool,
     },
+    /// Dragging a corner handle of a text box to scale it: font size, wrap width and
+    /// position all grow or shrink together around the opposite corner, `anchor`, which
+    /// stays put. `corner` is where the grabbed corner was, `grab` how far it was from
+    /// the pointer, and `size`/`wrap`/`pos` the box as it was when the drag began.
+    TextScale {
+        id: u64,
+        anchor: [f32; 2],
+        corner: [f32; 2],
+        grab: [f32; 2],
+        size: f32,
+        wrap: Option<f32>,
+        pos: [f32; 2],
+        changed: bool,
+        reedit: bool,
+    },
     /// The snapshot tool's box, from where the drag started to where it is now.
     Snapshot {
         start: [f32; 2],
@@ -127,6 +142,10 @@ pub enum Interaction {
 /// A grabbed image corner: (image id, opposite corner, direction to the grabbed corner,
 /// image size).
 type Handle = (u64, [f32; 2], [f32; 2], [f32; 2]);
+
+/// The smallest and largest font size scaling a text box by its corner goes to.
+const MIN_TEXT_SIZE: f32 = 4.0;
+const MAX_TEXT_SIZE: f32 = 400.0;
 
 /// Screen distance within which a resize handle catches the pointer.
 const HANDLE_REACH: f32 = 10.0;
@@ -676,39 +695,67 @@ impl PlexiApp {
         .map(|(_, anchor, dir)| (img.id, anchor, dir, img.size))
     }
 
-    /// The text box whose wrap-width handles are showing: the one being typed in, or else
-    /// the single selected box. Gives its id, the outline its handles sit on (the guide
-    /// around the box being typed in, or the dashed selection line), its left and right
-    /// edges in page units, and whether it is being typed in.
-    fn text_handle_box(&self, t: Target, view: View, origin: Pos2) -> Option<(u64, Rect, f32, f32, bool)> {
+    /// The text box whose handles are showing: the one being typed in, or else the single
+    /// selected box. Gives its id, the outline its handles sit on (the guide around the
+    /// box being typed in, or the dashed selection line), the box itself in page units,
+    /// and whether it is being typed in.
+    fn text_handle_box(&self, t: Target, view: View, origin: Pos2) -> Option<(u64, Rect, plexi_core::Rect, bool)> {
         if let Some((et, id)) = self.editing_text {
             let (gid, guide) = self.edit_guide?;
             if et != t || gid != id {
                 return None;
             }
-            let x0 = view.to_page(origin, pos2(guide.left() + EDIT_GUIDE_PAD, guide.top()))[0];
-            let x1 = view.to_page(origin, pos2(guide.right() - EDIT_GUIDE_PAD, guide.top()))[0];
-            return Some((id, guide, x0, x1, true));
+            let inner = guide.shrink(EDIT_GUIDE_PAD);
+            let b = plexi_core::Rect {
+                min: view.to_page(origin, inner.left_top()),
+                max: view.to_page(origin, inner.right_bottom()),
+            };
+            return Some((id, guide, b, true));
         }
         let tb = self.selected_text(t)?;
         let b = tb.approx_bounds();
-        Some((tb.id, view.rect_to_screen(origin, b).expand(SELECTION_PAD), b.min[0], b.max[0], false))
+        Some((tb.id, view.rect_to_screen(origin, b).expand(SELECTION_PAD), b, false))
     }
 
-    /// The wrap-width handle under screen point `pos`: the middle of the left or right
-    /// side of the box's outline. There is no height to drag, so there are no corners.
-    /// Gives the [`Interaction::TextResize`] that dragging it starts, and whether the box
-    /// is being typed in.
+    /// The text box handle under screen point `pos`, on the box's outline: a corner
+    /// scales the whole box, font size included ([`Interaction::TextScale`]); the middle
+    /// of the left or right side changes only its wrap width
+    /// ([`Interaction::TextResize`]). Gives the interaction dragging it starts, and
+    /// whether the box is being typed in.
     fn text_handle_at(&self, t: Target, view: View, origin: Pos2, pos: Pos2) -> Option<(Interaction, bool)> {
-        let (id, r, x0, x1, editing) = self.text_handle_box(t, view, origin)?;
+        let (id, r, b, editing) = self.text_handle_box(t, view, origin)?;
+        let p = view.to_page(origin, pos);
+        let corners = [
+            (r.left_top(), [b.min[0], b.min[1]], [b.max[0], b.max[1]]),
+            (r.right_top(), [b.max[0], b.min[1]], [b.min[0], b.max[1]]),
+            (r.right_bottom(), [b.max[0], b.max[1]], [b.min[0], b.min[1]]),
+            (r.left_bottom(), [b.min[0], b.max[1]], [b.max[0], b.min[1]]),
+        ];
+        if let Some(&(_, corner, anchor)) = corners.iter().find(|(c, ..)| c.distance(pos) <= HANDLE_REACH) {
+            let Some(Element::Text(tb)) = self.page_ref(t).elements.iter().find(|e| e.id() == id) else {
+                return None;
+            };
+            let scale = Interaction::TextScale {
+                id,
+                anchor,
+                corner,
+                grab: [corner[0] - p[0], corner[1] - p[1]],
+                size: tb.size,
+                wrap: tb.wrap,
+                pos: tb.pos,
+                changed: false,
+                reedit: editing,
+            };
+            return Some((scale, editing));
+        }
         let (anchor_x, edge, dir_x) = if r.left_center().distance(pos) <= HANDLE_REACH {
-            (x1, x0, -1.0)
+            (b.max[0], b.min[0], -1.0)
         } else if r.right_center().distance(pos) <= HANDLE_REACH {
-            (x0, x1, 1.0)
+            (b.min[0], b.max[0], 1.0)
         } else {
             return None;
         };
-        let grab = edge - view.to_page(origin, pos)[0];
+        let grab = edge - p[0];
         Some((Interaction::TextResize { id, anchor_x, dir_x, grab, changed: false, reedit: editing }, editing))
     }
 
@@ -882,7 +929,7 @@ impl PlexiApp {
             // A press on a side handle of the box being typed in resizes it; typing goes
             // on once the drag ends.
             if button == PointerButton::Primary
-                && let Some((resize @ Interaction::TextResize { id, .. }, true)) =
+                && let Some((resize @ (Interaction::TextResize { id, .. } | Interaction::TextScale { id, .. }), true)) =
                     self.text_handle_at(t, view, origin, pos)
             {
                 self.finish_text_edit();
@@ -1114,6 +1161,21 @@ impl PlexiApp {
                     *changed = true;
                 }
             }
+            Interaction::TextScale { id, anchor, corner, grab, size, wrap, pos, changed, .. } => {
+                // How far along the box's diagonal the grabbed corner now is, from the
+                // anchor: 1 is the size it started at.
+                let q = [p[0] + grab[0] - anchor[0], p[1] + grab[1] - anchor[1]];
+                let d = [corner[0] - anchor[0], corner[1] - anchor[1]];
+                let len2 = (d[0] * d[0] + d[1] * d[1]).max(1e-3);
+                let k = ((q[0] * d[0] + q[1] * d[1]) / len2).clamp(MIN_TEXT_SIZE / *size, MAX_TEXT_SIZE / *size);
+                let (id, anchor, size, wrap, pos) = (*id, *anchor, *size, *wrap, *pos);
+                if let Some(Element::Text(tb)) = self.page_mut(t).elements.iter_mut().find(|e| e.id() == id) {
+                    tb.size = size * k;
+                    tb.wrap = wrap.map(|w| w * k);
+                    tb.pos = [anchor[0] + (pos[0] - anchor[0]) * k, anchor[1] + (pos[1] - anchor[1]) * k];
+                    *changed = true;
+                }
+            }
             Interaction::Lasso { pts, rect, .. } => {
                 if *rect {
                     // Keep just the rectangle's four corners, start to current point.
@@ -1159,7 +1221,13 @@ impl PlexiApp {
             Interaction::TextAt(p) => self.open_text_at(t, p),
             Interaction::RightPress { start } => self.open_context_menu(t, view, self.canvas_origin, start),
             Interaction::Resize { id, changed, .. } => self.finish_resize(t, id, changed),
-            Interaction::TextResize { id, changed, reedit, .. } => {
+            Interaction::TextResize { id, changed, reedit, .. }
+            | Interaction::TextScale { id, changed, reedit, .. } => {
+                if changed && let Some(Element::Text(tb)) = self.page_mut(t).elements.iter_mut().find(|e| e.id() == id)
+                {
+                    // Land on a tidy size, not 23.4817.
+                    tb.size = (tb.size * 2.0).round() / 2.0;
+                }
                 self.finish_resize(t, id, changed);
                 if reedit && let Some(&id) = self.selection.iter().next() {
                     self.selection.clear();
@@ -1335,9 +1403,20 @@ impl PlexiApp {
             painter.circle_stroke(pos, r + 1.0, EStroke::new(1.0, Color32::from_white_alpha(200)));
             painter.circle_stroke(pos, r, EStroke::new(1.0, c));
         };
-        let text_handle = matches!(self.interaction, Interaction::TextResize { .. })
-            || (matches!(self.tool, Tool::Lasso | Tool::RectSelect | Tool::Hand | Tool::Text)
-                && self.text_handle_at(t, view, rect.min, pos).is_some());
+        let text_handle = match &self.interaction {
+            Interaction::TextResize { .. } => Some(None),
+            Interaction::TextScale { anchor, corner, .. } => Some(Some([corner[0] - anchor[0], corner[1] - anchor[1]])),
+            _ if matches!(self.tool, Tool::Lasso | Tool::RectSelect | Tool::Hand | Tool::Text) => {
+                match self.text_handle_at(t, view, rect.min, pos) {
+                    Some((Interaction::TextScale { anchor, corner, .. }, _)) => {
+                        Some(Some([corner[0] - anchor[0], corner[1] - anchor[1]]))
+                    }
+                    Some(_) => Some(None),
+                    None => None,
+                }
+            }
+            _ => None,
+        };
         let image_handle = match &self.interaction {
             Interaction::Resize { dir, .. } => Some(*dir),
             _ if matches!(self.tool, Tool::Lasso | Tool::RectSelect | Tool::Hand) => {
@@ -1347,8 +1426,12 @@ impl PlexiApp {
         };
         let resize = if erasing {
             None
-        } else if text_handle {
-            Some(CursorIcon::ResizeHorizontal)
+        } else if let Some(corner) = text_handle {
+            Some(match corner {
+                None => CursorIcon::ResizeHorizontal,
+                Some(d) if d[0] * d[1] > 0.0 => CursorIcon::ResizeNwSe,
+                Some(_) => CursorIcon::ResizeNeSw,
+            })
         } else {
             image_handle.map(|d| if d[0] * d[1] > 0.0 { CursorIcon::ResizeNwSe } else { CursorIcon::ResizeNeSw })
         };
@@ -1566,9 +1649,10 @@ impl PlexiApp {
                 painter.rect_stroke(h, 2.0, EStroke::new(1.5, accent), StrokeKind::Inside);
             }
         }
-        // Side handles for dragging a text box's wrap width, centered on its outline:
-        // the dashed selection line, or the guide around the box being typed in. Only
-        // the width can change, so they are tall bars on the left and right sides.
+        // A text box's handles sit on its outline: the dashed selection line, or the
+        // guide around the box being typed in. Tall bars in the middle of the left and
+        // right sides change the wrap width; squares on the corners scale the whole box,
+        // font size included.
         if let Some((_, r, ..)) = self.text_handle_box(t, view, origin) {
             let d = match &self.interaction {
                 Interaction::Move { delta, .. } => vec2(delta[0], delta[1]) * view.zoom,
@@ -1578,6 +1662,11 @@ impl PlexiApp {
                 let h = Rect::from_center_size(c + d, vec2(7.0, 16.0));
                 painter.rect_filled(h, 3.0, Color32::WHITE);
                 painter.rect_stroke(h, 3.0, EStroke::new(1.5, accent), StrokeKind::Inside);
+            }
+            for c in [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()] {
+                let h = Rect::from_center_size(c + d, vec2(8.0, 8.0));
+                painter.rect_filled(h, 2.0, Color32::WHITE);
+                painter.rect_stroke(h, 2.0, EStroke::new(1.5, accent), StrokeKind::Inside);
             }
         }
     }

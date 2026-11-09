@@ -360,7 +360,8 @@ fn vsep(ui: &mut Ui) {
 
 // ----- toolbars ---------------------------------------------------------------------
 
-fn tool_buttons(app: &mut PlexiApp, ui: &mut Ui, overlay: bool) {
+/// The tool buttons, the same in the notebook and on screen.
+fn tool_buttons(app: &mut PlexiApp, ui: &mut Ui) {
     for tool in [Tool::Pen, Tool::Highlighter, Tool::Eraser] {
         if icon_button(ui, tool_icon(tool), app.tool == tool, tool.label()).clicked() {
             app.tool = tool;
@@ -393,33 +394,24 @@ fn tool_buttons(app: &mut PlexiApp, ui: &mut Ui, overlay: bool) {
         }
     }
     let shapes = [ShapeKind::Arrow, ShapeKind::Rect, ShapeKind::Ellipse, ShapeKind::Line];
-    if overlay {
-        for k in [ShapeKind::Arrow, ShapeKind::Rect] {
-            let tool = Tool::Shape(k);
-            if icon_button(ui, tool_icon(tool), app.tool == tool, tool.label()).clicked() {
-                app.tool = tool;
-            }
-        }
-    } else {
-        let current = match app.tool {
-            Tool::Shape(k) => k,
-            _ => ui.data(|d| d.get_temp::<ShapeKind>(Id::unique("last-shape"))).unwrap_or(ShapeKind::Arrow),
-        };
-        let selected = matches!(app.tool, Tool::Shape(_));
-        let resp = icon_button(ui, tool_icon(Tool::Shape(current)), selected, "Shapes");
-        egui::Popup::menu(&resp).show(|ui| {
-            ui.horizontal(|ui| {
-                for k in shapes {
-                    let tool = Tool::Shape(k);
-                    if icon_button(ui, tool_icon(tool), app.tool == tool, tool.label()).clicked() {
-                        app.tool = tool;
-                        ui.data_mut(|d| d.insert_temp(Id::unique("last-shape"), k));
-                        ui.close();
-                    }
+    let current = match app.tool {
+        Tool::Shape(k) => k,
+        _ => ui.data(|d| d.get_temp::<ShapeKind>(Id::unique("last-shape"))).unwrap_or(ShapeKind::Arrow),
+    };
+    let selected = matches!(app.tool, Tool::Shape(_));
+    let resp = icon_button(ui, tool_icon(Tool::Shape(current)), selected, "Shapes");
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.horizontal(|ui| {
+            for k in shapes {
+                let tool = Tool::Shape(k);
+                if icon_button(ui, tool_icon(tool), app.tool == tool, tool.label()).clicked() {
+                    app.tool = tool;
+                    ui.data_mut(|d| d.insert_temp(Id::unique("last-shape"), k));
+                    ui.close();
                 }
-            });
+            }
         });
-    }
+    });
 }
 
 /// Text sizes offered by the size menu and stepped through by A− / A+.
@@ -589,7 +581,7 @@ pub fn notebook(app: &mut PlexiApp, ui: &mut Ui, rect: Rect) {
                     let menu = icon_button(ui, Icon::Menu, false, "Menu");
                     egui::Popup::menu(&menu).show(|ui| file_menu(app, ui));
                     vsep(ui);
-                    tool_buttons(app, ui, false);
+                    tool_buttons(app, ui);
                     vsep(ui);
                     color_and_width(app, ui);
                     vsep(ui);
@@ -847,7 +839,12 @@ fn file_menu(app: &mut PlexiApp, ui: &mut Ui) {
         app.open_export_dialog();
     }
     ui.separator();
-    if item(ui, "Draw on screen", &app.config.hotkey_draw.clone()).clicked() {
+    if app.is_overlay() {
+        if item(ui, "Back to the notebook", "N").clicked() {
+            ui.close();
+            app.exit_overlay(&ctx);
+        }
+    } else if item(ui, "Draw on screen", &app.config.hotkey_draw.clone()).clicked() {
         ui.close();
         app.enter_overlay(&ctx, false);
     }
@@ -980,12 +977,18 @@ pub fn overlay(app: &mut PlexiApp, ui: &mut Ui, rect: Rect, o: &Overlay) {
             pill(ui).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
-                    tool_buttons(app, ui, true);
+                    let menu = icon_button(ui, Icon::Menu, false, "Menu");
+                    egui::Popup::menu(&menu).show(|ui| file_menu(app, ui));
+                    vsep(ui);
+                    tool_buttons(app, ui);
                     vsep(ui);
                     color_and_width(app, ui);
                     vsep(ui);
                     if icon_button(ui, Icon::Undo, false, "Undo (Ctrl+Z)").clicked() {
                         app.undo();
+                    }
+                    if icon_button(ui, Icon::Redo, false, "Redo (Ctrl+Y)").clicked() {
+                        app.redo();
                     }
                     if icon_button(
                         ui,

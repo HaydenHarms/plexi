@@ -1377,10 +1377,8 @@ impl PlexiApp {
         ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
         ctx.send_viewport_cmd(ViewportCommand::Title("Plexi — drawing on screen".into()));
-        if matches!(
-            self.tool,
-            Tool::Lasso | Tool::RectSelect | Tool::Snapshot | Tool::Hand | Tool::Text | Tool::Shape(ShapeKind::Line)
-        ) {
+        // Every tool works on screen too, but "draw on screen" starts out drawing.
+        if matches!(self.tool, Tool::Lasso | Tool::RectSelect | Tool::Snapshot | Tool::Hand | Tool::Text) {
             self.tool = Tool::Pen;
         }
         self.mode = Mode::Overlay(Overlay {
@@ -2581,6 +2579,58 @@ mod tests {
         assert_ne!(first_id, later_id, "the picture shown changes as time passes");
     }
 
+    #[test]
+    fn gifs_keep_moving_on_screen() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.insert_image(gif(&[[255, 0, 0, 255], [0, 255, 0, 255]], 100), None, &ctx);
+        h.step(vec![]);
+        h.app.copy_selection();
+        h.app.enter_overlay(&ctx, false);
+        for _ in 0..4 {
+            h.step(vec![]);
+        }
+        h.app.paste_selection(&ctx);
+        let asset = h
+            .app
+            .doc
+            .overlay
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                Element::Image(i) => Some(i.asset.clone()),
+                _ => None,
+            })
+            .expect("the GIF was pasted on screen");
+        let mut seen = HashSet::new();
+        let mut delays = Vec::new();
+        for _ in 0..30 {
+            let raw = RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(1000.0, 800.0))),
+                time: Some(h.time),
+                ..Default::default()
+            };
+            let (app, frame) = (&mut h.app, &mut h.frame);
+            let mut out = h.ctx.run_ui(raw, |ui| eframe::App::ui(app, ui, frame));
+            out.textures_delta.clear();
+            h.time += 1.0 / 60.0;
+            delays.push(out.viewport_output[&egui::ViewportId::ROOT].repaint_delay);
+            if let Some(t) = h.app.textures.get(&asset) {
+                seen.insert(t.current(&ctx).id());
+            }
+        }
+        assert!(seen.len() > 1, "frames change on screen too");
+        assert!(delays.iter().all(|d| d.as_secs_f32() < 0.2), "it keeps asking to repaint: {delays:?}");
+        // Click-through too.
+        h.app.set_passthrough(&ctx, true);
+        let raw = RawInput { time: Some(h.time), ..Default::default() };
+        let (app, frame) = (&mut h.app, &mut h.frame);
+        let mut out = h.ctx.run_ui(raw, |ui| eframe::App::ui(app, ui, frame));
+        out.textures_delta.clear();
+        let d = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!(d.as_secs_f32() < 0.2, "click-through keeps it moving too: {d:?}");
+    }
+
     fn png(w: u32, h: u32) -> Vec<u8> {
         let mut out = std::io::Cursor::new(Vec::new());
         image::RgbaImage::from_pixel(w, h, image::Rgba([200, 30, 30, 255]))
@@ -2840,6 +2890,54 @@ mod tests {
         assert!(narrower.wrap.is_some_and(|w| (w - 60.0).abs() < 3.0), "{:?}", narrower.wrap);
         assert_eq!(h.app.editing_text.map(|(_, id)| id), Some(narrower.id), "still typing in it");
         assert_eq!(h.elements().len(), 1, "no new box was started");
+    }
+
+    #[test]
+    fn dragging_a_text_box_corner_scales_its_font() {
+        let mut h = Harness::new();
+        h.app.tool = Tool::Text;
+        h.click(300.0, 300.0);
+        h.step(vec![Event::Text("scale me".into())]);
+        h.click(700.0, 650.0);
+        h.step(vec![]);
+        let t = first_text(&h);
+        let b = t.approx_bounds();
+
+        h.app.tool = Tool::Hand;
+        let (view, origin) = (h.app.view, h.app.canvas_origin);
+        let at = view.to_screen(origin, [t.pos[0] + 5.0, t.pos[1] + 5.0]);
+        h.click(at.x, at.y);
+        assert_eq!(h.app.selection, HashSet::from([t.id]));
+        // The bottom-right corner handle sits on the dashed outline, 4 points out.
+        let corner = view.to_screen(origin, b.max) + egui::vec2(4.0, 4.0);
+        let twice = view.to_screen(origin, [b.min[0] + b.width() * 2.0, b.min[1] + b.height() * 2.0]);
+        let target = twice + egui::vec2(4.0, 4.0);
+        let mid = corner + (target - corner) / 2.0;
+        h.drag(PointerButton::Primary, &[(corner.x, corner.y), (mid.x, mid.y), (target.x, target.y)]);
+        let big = first_text(&h);
+        assert!((big.size - t.size * 2.0).abs() <= 1.0, "font {} -> {}", t.size, big.size);
+        assert!((big.pos[0] - t.pos[0]).abs() < 0.5 && (big.pos[1] - t.pos[1]).abs() < 0.5, "the top-left stays put");
+        assert_eq!(h.app.view.offset, view.offset, "dragging the corner doesn't pan");
+        assert_eq!(h.elements().len(), 1);
+
+        // While typing in it, the guide's corners do the same, and typing carries on.
+        h.app.tool = Tool::Text;
+        h.app.selection.clear();
+        h.app.begin_text_edit(h.app.target(), big.id);
+        h.step(vec![]);
+        h.step(vec![]);
+        let (_, guide) = h.app.edit_guide.expect("the guide was drawn");
+        let from = guide.left_top();
+        let to = from + (guide.right_bottom() - from) / 2.0;
+        h.drag(PointerButton::Primary, &[(from.x, from.y), (to.x, to.y)]);
+        let small = first_text(&h);
+        assert!(small.size < big.size * 0.7, "font {} -> {}", big.size, small.size);
+        assert_eq!(h.app.editing_text.map(|(_, id)| id), Some(small.id), "still typing in it");
+
+        // Undo puts the size back.
+        h.app.finish_text_edit();
+        h.app.undo();
+        assert_eq!(first_text(&h).size, big.size);
     }
 
     #[test]
