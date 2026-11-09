@@ -1,22 +1,3 @@
-- [x] Allow selecting multiple images holding shift
-- [x] Allow dynamic resizing, only keep ratio when holding shift
-- [x] Allow drag resizing of textboxs
-- [x] Play animated GIFs on the canvas
-- [x] Rectangle select tool (alongside the freeform lasso) to select an area, copy it and paste it elsewhere
-- [x] Hand tool: a neutral pointer for panning and grabbing, without having to pick the pen or the lasso
-- [x] Handwriting font: a tab where you write samples with the pen, saved as your own font to type in
-- [x] Make the text boxes' resize drag points sit in the middle of the dotted line, not the inside.
-- [x] None of the cursors i tried let me resize the text boxes. Allow text and hand tool at least to grab them
-- [x] Let's next all the select tools, and scrap the current rectangle screenshot function. Keep it as just a selector but let's make a "snapshot" tool under that next that just screenshots what we select on the canvas.
-- [x] Allow ctrl z in my handwriting font
-- [x] Make the hand tool look better
-- [x] The hand cursor should look like a hand, i just get the transform axis and clicking off an object doesnt deselect it.
-- [x] When there are no page numbers or borders, i do not want the shadow around the original page, i want it to be seamless
-- [x] Add a recording mode that crosses both canvas and on screen drawing (Records canvas on canvas, records whole monitor on screen drawing)
-- [x] Strokes on my handwriting don't show up until you lift off the page, make it write as you write.
-- [x] In my handwriting, the strokes are all straight-lined, no curves. I want curves
-- [x] Holding shift still doesn't let me select multiple things
-- [x] We don't need a print and export button, just export
-- [x] Allow selection printing instead of page selection so that you can print a section not bounded by a page
-- [x] Keep gif moving on "draw on screen" mode. Keep the same functions for both from now on.
-- [x] Let's give text boxes the corner drag resizers that dynamically change the font size as it scales.
+- [ ] Rework selected area printing, allow just for a button in the export menu that says select area and then allow the selection to happen from there with a rectangle selector.
+- [ ] For all menus make the hitbox for the x bigger
+- [ ] 
