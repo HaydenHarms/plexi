@@ -114,6 +114,28 @@ mod tests {
     use crate::model::*;
 
     #[test]
+    fn a_clipped_frame_leaves_the_rest_of_the_sheet_blank() {
+        let mut page = Page::new("p", PageSize::Infinite);
+        for x in [20.0, 80.0] {
+            page.elements.push(Element::Stroke(Stroke {
+                id: x as u64,
+                kind: InkKind::Pen,
+                color: Color::rgb(255, 0, 0),
+                width: 10.0,
+                points: vec![InkPoint::new(x, 20.0, 0.5), InkPoint::new(x, 80.0, 0.5)],
+            }));
+        }
+        let frame = Frame {
+            clip: Some(Rect::from_min_size([0.0, 0.0], [50.0, 100.0])),
+            ..Frame::exact(Rect::from_min_size([0.0, 0.0], [100.0, 100.0]))
+        };
+        let opts = RenderOptions { scale: 1.0, background: false, ..Default::default() };
+        let img = frame_rgba(&page, &Assets::new(), &opts, &frame).unwrap();
+        assert!(img.get_pixel(20, 50)[3] > 200, "the stroke inside the clip shows");
+        assert_eq!(img.get_pixel(80, 50)[3], 0, "the one outside it doesn't");
+    }
+
+    #[test]
     fn ink_shows_up_in_pixels() {
         let mut page = Page::new("p", PageSize::Custom([100.0, 100.0]));
         page.elements.push(Element::Stroke(Stroke {

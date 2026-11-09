@@ -366,11 +366,24 @@ pub fn frame_svg(page: &Page, assets: &Assets, opts: &RenderOptions, frame: &Fra
         n(b.height()),
     );
     let _ = writeln!(out, "<title>{}</title>", esc(&page.name));
+    if let Some(c) = frame.clip {
+        let _ = writeln!(
+            out,
+            "<clipPath id=\"plexi-clip\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath><g clip-path=\"url(#plexi-clip)\">",
+            n(c.min[0]),
+            n(c.min[1]),
+            n(c.width()),
+            n(c.height()),
+        );
+    }
     if opts.background {
         background_svg(&mut out, page, b);
     }
     for el in &page.elements {
         element_svg(&mut out, el, assets, opts);
+    }
+    if frame.clip.is_some() {
+        out.push_str("</g>\n");
     }
     out.push_str("</svg>\n");
     out

@@ -842,11 +842,7 @@ fn file_menu(app: &mut PlexiApp, ui: &mut Ui) {
         ui.close();
         app.save_as();
     }
-    if item(ui, "Export…", "Ctrl+E").clicked() {
-        ui.close();
-        app.open_export_dialog();
-    }
-    if item(ui, "Print…", "Ctrl+P").clicked() {
+    if item(ui, "Export or print…", "Ctrl+E").clicked() {
         ui.close();
         app.open_export_dialog();
     }
@@ -1071,7 +1067,6 @@ enum Cmd {
     SheetGuides,
     SheetNumbers,
     Snip,
-    Print,
     Fit,
     SelectAll,
     Delete,
@@ -1099,8 +1094,7 @@ fn commands(app: &PlexiApp) -> Vec<(Cmd, String, String)> {
         (Cmd::Open, "Open…".into(), "Ctrl+O".into()),
         (Cmd::Save, "Save".into(), "Ctrl+S".into()),
         (Cmd::SaveAs, "Save as…".into(), "Ctrl+Shift+S".into()),
-        (Cmd::Export, "Export… (PDF, PNG, SVG, Markdown, …)".into(), "Ctrl+E".into()),
-        (Cmd::Print, "Print…".into(), "Ctrl+P".into()),
+        (Cmd::Export, "Export or print… (PDF, PNG, SVG, Markdown, …)".into(), "Ctrl+E".into()),
         (Cmd::Snip, "Snip an area of the screen".into(), hk.hotkey_snip.clone()),
         (Cmd::AddPage, "Add page".into(), "Ctrl+Enter".into()),
         (Cmd::DeletePage, "Delete page".into(), String::new()),
@@ -1206,7 +1200,6 @@ fn run_cmd(app: &mut PlexiApp, ctx: &Context, cmd: Cmd) {
         Cmd::SheetGuides => app.config.sheet_guides = !app.config.sheet_guides,
         Cmd::SheetNumbers => app.config.sheet_numbers = !app.config.sheet_numbers,
         Cmd::Snip => app.start_snip(ctx),
-        Cmd::Print => app.open_export_dialog(),
         Cmd::Fit => app.fit_pending = true,
         Cmd::SelectAll => app.select_all(),
         Cmd::Delete => app.delete_selection(),
@@ -1316,7 +1309,7 @@ pub struct Preview {
     /// Settings the frame list was built for.
     key: String,
     /// Every output page: which page it shows (`None` is the screen ink) and its frame.
-    frames: Vec<(Option<usize>, OutFrame)>,
+    pub(crate) frames: Vec<(Option<usize>, OutFrame)>,
     pub index: usize,
     /// How many output pages there are before the page list picks some.
     total: usize,
@@ -1531,11 +1524,14 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                         ui.label("What");
                         ui.vertical(|ui| {
                             ui.radio_value(&mut dlg.scope, ExportScope::CurrentPage, "This page");
-                            if has_pages {
+                            if has_pages && dlg.area != Area::Region {
                                 ui.radio_value(&mut dlg.scope, ExportScope::AllPages, "All pages");
                             }
                             ui.radio_value(&mut dlg.scope, ExportScope::ScreenInk, "Screen ink (overlay)");
                         });
+                        if dlg.area == Area::Region && dlg.scope == ExportScope::AllPages {
+                            dlg.scope = ExportScope::CurrentPage;
+                        }
                         ui.end_row();
 
                         let total = dlg.preview.total();
@@ -1567,6 +1563,11 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                                 let whole = if fixed_page { "Whole page" } else { "Everything drawn" };
                                 ui.radio_value(&mut dlg.area, Area::Page, whole);
                                 ui.radio_value(&mut dlg.area, Area::Content, "Trim to the drawing");
+                                if dlg.region.is_some() {
+                                    ui.radio_value(&mut dlg.area, Area::Region, "Selected part").on_hover_text(
+                                        "Just the box around what you selected, wherever the sheet outlines are",
+                                    );
+                                }
                             });
                             ui.end_row();
 
@@ -1615,7 +1616,7 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                                     ui.end_row();
                                 }
                             }
-                            if dlg.paper != PaperChoice::Fit {
+                            if dlg.paper != PaperChoice::Fit && dlg.area != Area::Region {
                                 ui.label("Fit");
                                 ui.vertical(|ui| {
                                     ui.radio_value(&mut dlg.tile, false, "Shrink onto one sheet");
@@ -1626,7 +1627,7 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                             }
                             ui.label("Margin");
                             ui.add_enabled(
-                                !(dlg.tile && dlg.paper != PaperChoice::Fit),
+                                !(dlg.tile && dlg.paper != PaperChoice::Fit && dlg.area != Area::Region),
                                 egui::Slider::new(&mut dlg.margin_in, 0.0..=2.0).step_by(0.05).suffix(" in"),
                             );
                             ui.end_row();
@@ -1906,7 +1907,7 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
             ("Straight lines, squares", "hold Shift".into()),
             ("Copy selection · paste it back", "Ctrl+C · Ctrl+V".into()),
             ("Paste image or text", "Ctrl+V".into()),
-            ("Save · Open · Export · Print", "Ctrl+S · Ctrl+O · Ctrl+E · Ctrl+P".into()),
+            ("Save · Open · Export and print", "Ctrl+S · Ctrl+O · Ctrl+E (or Ctrl+P)".into()),
             ("On screen: click-through · clear · snapshot", "Esc · C · Ctrl+Shift+C".into()),
         ];
         egui::Grid::new("keys").num_columns(2).spacing(vec2(24.0, 6.0)).striped(true).show(ui, |ui| {

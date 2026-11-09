@@ -148,6 +148,9 @@ pub struct ExportDialog {
     /// Export only the output pages listed in `page_list` (e.g. "1, 3, 5-7").
     pub pick_pages: bool,
     pub page_list: String,
+    /// The bounds of what was selected when the dialog opened, for [`Area::Region`]:
+    /// printing or exporting a section of the canvas regardless of sheet outlines.
+    pub region: Option<plexi_core::Rect>,
     pub preview: crate::ui::Preview,
 }
 
@@ -163,7 +166,13 @@ impl ExportDialog {
     }
 
     pub fn layout(&self) -> Layout {
-        Layout { area: self.area, sheet: self.sheet(), tile: self.tile, margin: self.margin_in * 96.0 }
+        Layout {
+            area: self.area,
+            sheet: self.sheet(),
+            tile: self.tile,
+            margin: self.margin_in * 96.0,
+            region: self.region,
+        }
     }
 
     pub fn render_options(&self) -> RenderOptions {
@@ -1961,12 +1970,14 @@ impl PlexiApp {
         // An infinite canvas prints on the sheets its guides show; a fixed page as itself.
         let infinite = !self.is_overlay() && self.doc.pages[self.page].size.dims().is_none();
         let paper = if infinite { PaperChoice::Preset(self.config.sheet_paper) } else { PaperChoice::Fit };
+        // With something selected, start on just that part.
+        let region = self.selection_bounds(self.target());
         self.export = Some(ExportDialog {
             format: ExportFormat::Pdf,
             scope,
             scale: 2.0,
             background: !self.is_overlay(),
-            area: Area::Page,
+            area: if region.is_some() { Area::Region } else { Area::Page },
             paper,
             landscape: self.config.sheet_landscape,
             custom_in: [8.5, 11.0],
@@ -1974,6 +1985,7 @@ impl PlexiApp {
             margin_in: 0.0,
             pick_pages: false,
             page_list: String::new(),
+            region,
             preview: Default::default(),
         });
     }
@@ -2305,6 +2317,64 @@ mod tests {
         h.set_shift(false);
         assert_eq!(h.app.selection.len(), 2, "the second lasso's catch joins the first");
         assert!(h.app.selection.contains(&first), "the first stroke is still selected");
+    }
+
+    #[test]
+    fn shift_clicking_with_the_hand_selects_several_things() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 500.0));
+        h.app.tool = Tool::Hand;
+        h.click(400.0, 300.0);
+        assert_eq!(h.app.selection.len(), 1);
+        h.set_shift(true);
+        h.click(400.0, 500.0);
+        assert_eq!(h.app.selection.len(), 2, "shift+click adds the second stroke");
+        h.click(400.0, 650.0);
+        assert_eq!(h.app.selection.len(), 2, "shift+click on empty canvas keeps the selection");
+        h.click(400.0, 300.0);
+        h.set_shift(false);
+        assert_eq!(h.app.selection.len(), 1, "shift+click on a selected stroke takes it out");
+
+        // Dragging moves everything selected.
+        h.set_shift(true);
+        h.click(400.0, 300.0);
+        h.set_shift(false);
+        let before: Vec<_> = h.elements().iter().map(|e| e.bounds().min).collect();
+        h.drag(PointerButton::Primary, &[(400.0, 300.0), (420.0, 330.0), (440.0, 360.0)]);
+        let after: Vec<_> = h.elements().iter().map(|e| e.bounds().min).collect();
+        assert!(before.iter().zip(&after).all(|(b, a)| a[1] > b[1] + 20.0), "{before:?} -> {after:?}");
+    }
+
+    #[test]
+    fn exporting_with_something_selected_covers_just_that_part() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 600.0));
+        h.app.tool = Tool::RectSelect;
+        h.drag(PointerButton::Primary, &[(250.0, 250.0), (550.0, 350.0)]);
+        let bounds = h.app.selection_bounds(h.app.target()).expect("the first stroke");
+        h.app.open_export_dialog();
+        let dlg = h.app.export.as_mut().expect("the dialog");
+        assert_eq!(dlg.area, Area::Region, "starts on the selected part");
+        dlg.scope = ExportScope::AllPages;
+        h.step(vec![]);
+        let dlg = h.app.export.as_ref().unwrap();
+        assert_eq!(dlg.scope, ExportScope::CurrentPage, "a selected part is on one page");
+        assert_eq!(dlg.preview.frames.len(), 1);
+        // On Letter paper the sheet is bigger than the part; everything past the part's
+        // edge is clipped off.
+        let shown = dlg.preview.frames[0].1.clip.expect("clipped to the part");
+        assert!(shown.contains(bounds.min) && shown.contains(bounds.max));
+        let other = h.elements()[1].bounds().center();
+        assert!(!shown.contains(other), "the other stroke is left out");
+
+        // Nothing selected: no such option.
+        h.app.export = None;
+        h.app.selection.clear();
+        h.app.open_export_dialog();
+        assert_eq!(h.app.export.as_ref().unwrap().area, Area::Page);
+        assert!(h.app.export.as_ref().unwrap().region.is_none());
     }
 
     #[test]
@@ -2800,6 +2870,27 @@ mod tests {
         h.drag(PointerButton::Primary, &[(250.0, 250.0), (550.0, 350.0)]);
         h.app.copy_selection();
         assert!(h.app.clip.is_some());
+    }
+
+    #[test]
+    fn handwriting_keeps_its_curves() {
+        let mut h = Harness::new();
+        h.app.handwriting.open = true;
+        h.step(vec![]);
+        let rect = *h.app.handwriting.boxes.get(&'O').expect("the 'O' box was painted");
+        let c = rect.center();
+        let circle: Vec<(f32, f32)> = (0..=40)
+            .map(|i| {
+                let a = i as f32 / 40.0 * std::f32::consts::TAU;
+                (c.x + a.cos() * rect.width() * 0.3, c.y + a.sin() * rect.height() * 0.3)
+            })
+            .collect();
+        h.drag(PointerButton::Primary, &circle);
+        let strokes = h.app.handwriting.samples.strokes('O');
+        assert_eq!(strokes.len(), 1);
+        assert!(strokes[0].points.len() >= 12, "a circle keeps its curve: {} points", strokes[0].points.len());
+        // Still in the box's 0..1 units.
+        assert!(strokes[0].points.iter().all(|p| (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y)));
     }
 
     #[test]

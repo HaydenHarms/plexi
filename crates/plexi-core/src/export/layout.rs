@@ -26,6 +26,10 @@ pub enum Area {
     Page,
     /// Only what is drawn, trimmed tight (plus the margin).
     Content,
+    /// A part of the page picked in the editor, [`Layout::region`], whatever the sheet
+    /// outlines: anything drawn across its edge is cut off there. Never split across
+    /// sheets.
+    Region,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,11 +43,13 @@ pub struct Layout {
     pub tile: bool,
     /// Blank space around the content, in page units.
     pub margin: f32,
+    /// The part of the page [`Area::Region`] covers.
+    pub region: Option<Rect>,
 }
 
 impl Default for Layout {
     fn default() -> Self {
-        Self { area: Area::Page, sheet: None, tile: false, margin: 0.0 }
+        Self { area: Area::Page, sheet: None, tile: false, margin: 0.0, region: None }
     }
 }
 
@@ -53,11 +59,15 @@ impl Default for Layout {
 pub struct Frame {
     pub view: Rect,
     pub size: [f32; 2],
+    /// Show only this part of `view` (page units), leaving the rest of the sheet blank:
+    /// set for [`Area::Region`], so a part printed on a bigger sheet doesn't bring the
+    /// drawing around it along.
+    pub clip: Option<Rect>,
 }
 
 impl Frame {
     pub fn exact(view: Rect) -> Self {
-        Self { view, size: [view.width().max(1.0), view.height().max(1.0)] }
+        Self { view, size: [view.width().max(1.0), view.height().max(1.0)], clip: None }
     }
 
     /// Output units per page unit.
@@ -67,10 +77,12 @@ impl Frame {
 }
 
 /// The part of `page` an export covers before it is placed on sheets.
-pub fn area_rect(page: &Page, area: Area) -> Rect {
-    match area {
+pub fn area_rect(page: &Page, layout: &Layout) -> Rect {
+    let content = || page.content_bounds().filter(|b| !b.is_empty()).unwrap_or_else(|| page.export_bounds());
+    match layout.area {
         Area::Page => page.export_bounds(),
-        Area::Content => page.content_bounds().filter(|b| !b.is_empty()).unwrap_or_else(|| page.export_bounds()),
+        Area::Content => content(),
+        Area::Region => layout.region.filter(|r| !r.is_empty()).unwrap_or_else(content),
     }
 }
 
@@ -103,12 +115,23 @@ pub fn used_tiles(page: &Page, tile: [f32; 2]) -> Vec<Rect> {
 
 /// The output pages for `page` under `layout`.
 pub fn frames(page: &Page, layout: &Layout) -> Vec<Frame> {
-    let area = area_rect(page, layout.area);
+    let mut out = sheet_frames(page, layout);
+    if layout.area == Area::Region {
+        let area = area_rect(page, layout);
+        for f in &mut out {
+            f.clip = Some(area);
+        }
+    }
+    out
+}
+
+fn sheet_frames(page: &Page, layout: &Layout) -> Vec<Frame> {
+    let area = area_rect(page, layout);
     let m = layout.margin.max(0.0);
     let Some([w, h]) = layout.sheet else {
         return vec![Frame::exact(area.expand(m))];
     };
-    if layout.tile {
+    if layout.tile && layout.area != Area::Region {
         let tiles: Vec<Rect> = used_tiles(page, [w, h]).into_iter().filter(|t| t.intersects(&area)).collect();
         if tiles.is_empty() {
             return vec![Frame::exact(Rect::from_min_size(area.min, [w, h]))];
@@ -121,7 +144,7 @@ pub fn frames(page: &Page, layout: &Layout) -> Vec<Frame> {
     let (vw, vh) = (w / s, h / s);
     let c = area.center();
     let top = if area.height() * s < ih { area.min[1] - m / s } else { c[1] - vh / 2.0 };
-    vec![Frame { view: Rect::from_min_size([c[0] - vw / 2.0, top], [vw, vh]), size: [w, h] }]
+    vec![Frame { view: Rect::from_min_size([c[0] - vw / 2.0, top], [vw, vh]), size: [w, h], clip: None }]
 }
 
 /// Parse a page list like `1, 3, 5-7` (1-based, as people count pages) into sorted
@@ -208,12 +231,12 @@ mod tests {
         let mut page = Page::new("p", PageSize::Infinite);
         page.elements.push(dot(0.0, 0.0));
         page.elements.push(dot(3000.0, 0.0));
-        let layout = Layout { area: Area::Content, sheet: Some([816.0, 1056.0]), tile: false, margin: 48.0 };
+        let layout = Layout { area: Area::Content, sheet: Some([816.0, 1056.0]), margin: 48.0, ..Default::default() };
         let f = frames(&page, &layout);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].size, [816.0, 1056.0]);
         assert!(f[0].scale() < 0.3);
-        let area = area_rect(&page, Area::Content);
+        let area = area_rect(&page, &layout);
         assert!(f[0].view.min[0] < area.min[0] && f[0].view.max[0] > area.max[0]);
     }
 
@@ -223,5 +246,24 @@ mod tests {
         page.elements.push(dot(0.0, 0.0));
         let layout = Layout { area: Area::Content, sheet: Some([816.0, 1056.0]), ..Default::default() };
         assert_eq!(frames(&page, &layout)[0].scale(), 1.0);
+    }
+
+    #[test]
+    fn a_region_prints_just_that_part_on_one_sheet() {
+        let mut page = Page::new("p", PageSize::Infinite);
+        page.elements.push(dot(100.0, 100.0));
+        page.elements.push(dot(900.0, 100.0)); // across a sheet outline
+        let region = Rect::from_min_size([50.0, 50.0], [900.0, 120.0]);
+        let exact = Layout { area: Area::Region, region: Some(region), ..Default::default() };
+        assert_eq!(frames(&page, &exact), vec![Frame { clip: Some(region), ..Frame::exact(region) }]);
+        // On paper it's one sheet, even with splitting across sheets turned on.
+        let paper = Layout { sheet: Some([816.0, 1056.0]), tile: true, ..exact };
+        let f = frames(&page, &paper);
+        assert_eq!(f.len(), 1);
+        assert!(f[0].view.contains(region.min) && f[0].view.contains(region.max));
+        assert_eq!(f[0].clip, Some(region), "the rest of the sheet stays blank");
+        // No region picked: falls back to the drawing.
+        let none = Layout { region: None, ..exact };
+        assert_eq!(area_rect(&page, &none), area_rect(&page, &Layout { area: Area::Content, ..Default::default() }));
     }
 }

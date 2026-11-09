@@ -957,18 +957,9 @@ impl PlexiApp {
                     return;
                 }
                 if shift {
-                    // Shift+click adds an unselected element to the selection, or
-                    // removes one that's already in it — it never just replaces the
-                    // selection, so it skips the "drag what's already selected" shortcut
-                    // below even when pressed inside the current selection's bounds.
-                    match self.hit_element(t, p, 4.0 / view.zoom, false) {
-                        Some(id) if self.selection.remove(&id) => self.interaction = Interaction::Idle,
-                        Some(id) => {
-                            self.selection.insert(id);
-                            self.interaction = Interaction::Move { start: p, delta: [0.0, 0.0] };
-                        }
+                    if !self.shift_toggle(t, view, p) {
                         // Empty space: a lasso/rectangle that adds its catch to the selection.
-                        None => self.interaction = Interaction::Lasso { pts: vec![p], extend: true, rect },
+                        self.interaction = Interaction::Lasso { pts: vec![p], extend: true, rect };
                     }
                     return;
                 }
@@ -988,6 +979,14 @@ impl PlexiApp {
                 // A neutral pointer: resize with the handles, grab and move whatever's
                 // under it, or pan empty canvas. It never draws or starts a lasso.
                 if self.grab_handle(t, view, origin, pos, true) {
+                    return;
+                }
+                if shift {
+                    // Same as the select tools; Shift on empty canvas pans and keeps the
+                    // selection.
+                    if !self.shift_toggle(t, view, p) && matches!(t, Target::Page(_)) {
+                        self.interaction = Interaction::Pan { last: pos };
+                    }
                     return;
                 }
                 let inside = self.selection_bounds(t).is_some_and(|b| b.expand(6.0 / view.zoom).contains(p));
@@ -1015,6 +1014,22 @@ impl PlexiApp {
             Tool::Snapshot => self.interaction = Interaction::Snapshot { start: p, end: p },
             Tool::Shape(kind) => self.interaction = Interaction::Shape { kind, start: p, end: p },
         }
+    }
+
+    /// Shift+press at `p`: adds the element there to the selection (and lets the drag move
+    /// everything selected), or takes it out if it was already in. It never replaces the
+    /// selection, so it skips the "drag what's already selected" shortcut even inside the
+    /// selection's bounds. Returns `false` if there's nothing under `p`.
+    fn shift_toggle(&mut self, t: Target, view: View, p: [f32; 2]) -> bool {
+        match self.hit_element(t, p, 4.0 / view.zoom, false) {
+            Some(id) if self.selection.remove(&id) => self.interaction = Interaction::Idle,
+            Some(id) => {
+                self.selection.insert(id);
+                self.interaction = Interaction::Move { start: p, delta: [0.0, 0.0] };
+            }
+            None => return false,
+        }
+        true
     }
 
     /// Edit the text box under `p`, or start a new one there.

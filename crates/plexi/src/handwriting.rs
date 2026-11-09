@@ -87,12 +87,44 @@ impl HandwritingState {
     }
 }
 
-/// A box's pixel position in a normalized (`x`, `y`) pen sample: both axes are divided
-/// by the box's height, not its (narrower) width, so a circular pen tip stays circular
-/// — see the `BOX_WIDTH` docs in `plexi_core::handwriting`.
-fn normalize(rect: Rect, p: Pos2) -> [f32; 2] {
+/// A pointer position as pixels from the box's top-left corner. Strokes are recorded in
+/// these units while the pen is down, because the stroke builder's filtering and
+/// simplification are tuned for page-sized units: in the box's 0..1 units they'd flatten
+/// every curve into a few straight lines.
+fn box_px(rect: Rect, p: Pos2) -> [f32; 2] {
+    [p.x - rect.left(), p.y - rect.top()]
+}
+
+/// A finished stroke recorded in [`box_px`] units, normalized to the box: both axes are
+/// divided by the box's height, not its (narrower) width, so a circular pen tip stays
+/// circular — see the `BOX_WIDTH` docs in `plexi_core::handwriting`.
+fn normalize(rect: Rect, mut stroke: plexi_core::Stroke) -> plexi_core::Stroke {
     let scale = rect.height().max(1.0);
-    [(p.x - rect.left()) / scale, (p.y - rect.top()) / scale]
+    for p in &mut stroke.points {
+        p.x /= scale;
+        p.y /= scale;
+    }
+    stroke
+}
+
+/// Paint `points` (normalized box units) as one ink line `width` pixels wide.
+fn paint_line(painter: &Painter, rect: Rect, points: &[plexi_core::InkPoint], width: f32, color: egui::Color32) {
+    let scale = rect.height();
+    let pts: Vec<Pos2> = points.iter().map(|p| pos2(rect.left() + p.x * scale, rect.top() + p.y * scale)).collect();
+    match pts.as_slice() {
+        [] => {}
+        // A single tap (one point, no drag) still shows up as a dot.
+        [one] => {
+            painter.circle_filled(*one, width / 2.0, color);
+        }
+        _ => {
+            painter.add(egui::Shape::line(pts.clone(), egui::Stroke::new(width, color)));
+            // Round the ends and the joins between segments.
+            for p in pts {
+                painter.circle_filled(p, width / 2.0, color);
+            }
+        }
+    }
 }
 
 /// Paint one glyph box: its border, baseline/x-height guides, a faint target character
@@ -117,17 +149,8 @@ fn paint_box(ui: &Ui, painter: &Painter, rect: Rect, c: char, strokes: &[plexi_c
             th.ink.gamma_multiply(0.22),
         );
     }
-    let to_screen = |p: [f32; 2]| pos2(rect.left() + p[0] * scale, rect.top() + p[1] * scale);
     for stroke in strokes {
-        let width = (stroke.width * scale).max(1.0);
-        let ink = EguiStroke::new(width, th.ink);
-        for pair in stroke.points.windows(2) {
-            painter.line_segment([to_screen(pair[0].pos()), to_screen(pair[1].pos())], ink);
-        }
-        // A single tap (one point, no drag) still shows up as a dot.
-        if stroke.points.len() == 1 {
-            painter.circle_filled(to_screen(stroke.points[0].pos()), width / 2.0, th.ink);
-        }
+        paint_line(painter, rect, &stroke.points, (stroke.width * scale).max(1.0), th.ink);
     }
 }
 
@@ -136,10 +159,9 @@ fn paint_box(ui: &Ui, painter: &Painter, rect: Rect, c: char, strokes: &[plexi_c
 fn capture(app: &mut PlexiApp, ui: &Ui, response: &Response, rect: Rect, c: char) {
     let now = ui.input(|i| i.time);
     if response.drag_started() {
-        let min_step = 0.5 / rect.height().max(1.0);
-        let mut b = StrokeBuilder::new(Samples::new_stroke(), app.config.smoothing, min_step);
+        let mut b = StrokeBuilder::new(Samples::new_stroke(), app.config.smoothing, 0.5);
         if let Some(pos) = response.interact_pointer_pos() {
-            b.push(now, normalize(rect, pos), 0.5);
+            b.push(now, box_px(rect, pos), 0.5);
         }
         app.handwriting.drawing = Some((c, b));
     } else if response.dragged()
@@ -147,15 +169,22 @@ fn capture(app: &mut PlexiApp, ui: &Ui, response: &Response, rect: Rect, c: char
         && *dc == c
         && let Some(pos) = response.interact_pointer_pos()
     {
-        b.push(now, normalize(rect, pos), 0.5);
+        b.push(now, box_px(rect, pos), 0.5);
     } else if response.drag_stopped()
         && let Some((dc, _)) = &app.handwriting.drawing
         && *dc == c
         && let Some((_, b)) = app.handwriting.drawing.take()
     {
         app.handwriting.checkpoint();
-        app.handwriting.samples.push_stroke(c, b.finish());
+        app.handwriting.samples.push_stroke(c, normalize(rect, b.finish()));
     }
+}
+
+/// The stroke being written in `c`'s box right now, in normalized box units, so it
+/// shows while the pen is still down.
+fn live_stroke(app: &PlexiApp, rect: Rect, c: char) -> Option<plexi_core::Stroke> {
+    let (dc, b) = app.handwriting.drawing.as_ref()?;
+    (*dc == c).then(|| normalize(rect, b.stroke.clone()))
 }
 
 /// One character's box, plus a small button to clear just that glyph.
@@ -167,6 +196,10 @@ fn glyph_box(app: &mut PlexiApp, ui: &mut Ui, c: char) {
         app.handwriting.boxes.insert(c, rect);
         paint_box(ui, ui.painter(), rect, c, app.handwriting.samples.strokes(c));
         capture(app, ui, &response, rect, c);
+        if let Some(live) = live_stroke(app, rect, c) {
+            let th = crate::ui::theme(ui);
+            paint_line(ui.painter(), rect, &live.points, (live.width * rect.height()).max(1.0), th.ink);
+        }
         ui.horizontal(|ui| {
             ui.add_space((rect.width() - 18.0).max(0.0) / 2.0);
             let has_ink = !app.handwriting.samples.strokes(c).is_empty();
