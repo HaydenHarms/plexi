@@ -2,3 +2,4 @@
 - [ ] Allow for multiple, named handwriting fonts
 - [ ] Allow font file format exporting
 - [ ] Allow dynamic scaling with text boxes as well, right now it's only proportional
+- [ ] We need a grouping function in the right click menu
