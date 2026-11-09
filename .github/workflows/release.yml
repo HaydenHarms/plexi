@@ -154,6 +154,11 @@ jobs:
     needs: [windows, macos]
     runs-on: ubuntu-latest
     steps:
+      # Before the download: checkout empties the workspace.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: release notes
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -170,19 +175,32 @@ jobs:
           name: plexi-${{ needs.windows.outputs.version }}
           path: dist/*
 
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.windows.outputs.version }}
+        run: |
+          notes="release notes/v$VERSION.md"
+          {
+            if [ -f "$notes" ]; then cat "$notes"; echo; fi
+            cat <<'DOWNLOADS'
+          **Which download?**
+          - `Plexi-$VERSION-setup.exe` — Windows installer. No admin needed; adds Start menu entries, opens `.plexi` files, and can start Plexi with Windows.
+          - `Plexi-$VERSION-portable.exe` — Windows, nothing to install. Keeps its settings and autosaves in a `PlexiData` folder next to the exe.
+          - `Plexi-$VERSION-portable.zip` — the portable Windows build in a folder, for USB sticks.
+          - `Plexi-$VERSION-x64.msi` — all-users MSI for managed PCs.
+          - `Plexi-$VERSION-macos.dmg` — macOS 11+ (Apple silicon and Intel). Open it and drag Plexi to Applications.
+          - `Plexi-$VERSION-macos.zip` — the same Mac app, zipped.
+
+          Builds are not code-signed yet. On Windows, SmartScreen may warn on first run ("More info" → "Run anyway"). On a Mac, right-click Plexi → Open the first time (or allow it under System Settings → Privacy & Security). Screenshots from draw-on-screen mode need Screen Recording permission on macOS.
+          DOWNLOADS
+          } > release-body.md
+          sed -i "s/[$]VERSION/$VERSION/g" release-body.md
+          cat release-body.md
+
       - name: Publish release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
-          body: |
-            **Which download?**
-            - `Plexi-${{ needs.windows.outputs.version }}-setup.exe` — Windows installer. No admin needed; adds Start menu entries, opens `.plexi` files, and can start Plexi with Windows.
-            - `Plexi-${{ needs.windows.outputs.version }}-portable.exe` — Windows, nothing to install. Keeps its settings and autosaves in a `PlexiData` folder next to the exe.
-            - `Plexi-${{ needs.windows.outputs.version }}-portable.zip` — the portable Windows build in a folder, for USB sticks.
-            - `Plexi-${{ needs.windows.outputs.version }}-x64.msi` — all-users MSI for managed PCs.
-            - `Plexi-${{ needs.windows.outputs.version }}-macos.dmg` — macOS 11+ (Apple silicon and Intel). Open it and drag Plexi to Applications.
-            - `Plexi-${{ needs.windows.outputs.version }}-macos.zip` — the same Mac app, zipped.
-
-            Builds are not code-signed yet. On Windows, SmartScreen may warn on first run ("More info" → "Run anyway"). On a Mac, right-click Plexi → Open the first time (or allow it under System Settings → Privacy & Security). Screenshots from draw-on-screen mode need Screen Recording permission on macOS.
+          body_path: release-body.md
