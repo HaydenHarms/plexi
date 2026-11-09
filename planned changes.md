@@ -5,3 +5,4 @@
 - [ ] We need a grouping function in the right click menu
 - [ ] Allow resizing of shapes, I thought that would have been intuitive in the first place
 - [ ] Add rotation of shapes, text, images, etc.
+- [ ] When selecting multiple, show each individual selection rather than expanding one selection box, thanks
