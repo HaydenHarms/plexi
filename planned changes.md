@@ -10,3 +10,4 @@
 - [ ] Let's next all the select tools, and scrap the current rectangle screenshot function. Keep it as just a selector but let's make a "snapshot" tool under that next that just screenshots what we select on the canvas.
 - [ ] Allow ctrl z in my handwriting font
 - [ ] Make the hand tool look better
+- [ ] The hand cursor should look like a hand, i just get the transform axis and clicking off an object doesnt deselect it.
