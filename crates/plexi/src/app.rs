@@ -29,6 +29,7 @@ pub enum Tool {
     Eraser,
     Lasso,
     RectSelect,
+    Snapshot,
     Hand,
     Text,
     Shape(ShapeKind),
@@ -42,6 +43,7 @@ impl Tool {
             Tool::Eraser => "Eraser (E) — middle-drag erases with any tool",
             Tool::Lasso => "Select (S) — lasso, drag to move, Del to delete",
             Tool::RectSelect => "Rectangle select (M) — drag a box to select, Del to delete",
+            Tool::Snapshot => "Snapshot — drag a box to copy that part of the page as a picture",
             Tool::Hand => "Hand (G) — drag to pan, or to grab and move an element",
             Tool::Text => "Text (T)",
             Tool::Shape(ShapeKind::Line) => "Line (L)",
@@ -281,6 +283,10 @@ pub struct PlexiApp {
     pub trackpad_scroll: bool,
     /// Top-left of the canvas on screen, as of the last frame.
     pub canvas_origin: egui::Pos2,
+    /// The guide drawn around the text box being typed in last frame, by box id.
+    pub edit_guide: Option<(u64, egui::Rect)>,
+    /// An area the snapshot tool picked, to copy to the clipboard this frame.
+    pub snapshot_request: Option<(Target, plexi_core::Rect)>,
     /// Bumped on every document change; caches keyed on it (sheet guides, export
     /// preview) know when to rebuild.
     pub revision: u64,
@@ -347,6 +353,8 @@ impl PlexiApp {
             update: UpdateState::Idle,
             trackpad_scroll: false,
             canvas_origin: egui::Pos2::ZERO,
+            edit_guide: None,
+            snapshot_request: None,
             revision: 0,
             sheet_cache: None,
             shell: None,
@@ -1126,7 +1134,7 @@ impl PlexiApp {
     /// onto Plexi's own clipboard, ready for [`PlexiApp::paste_selection`]. Also puts a
     /// PNG of the selection on the system clipboard, so it can be pasted into other
     /// apps too — best-effort, and never at the cost of the internal copy.
-    pub fn copy_selection(&mut self, ctx: &Context) {
+    pub fn copy_selection(&mut self) {
         if self.selection.is_empty() {
             return;
         }
@@ -1136,19 +1144,26 @@ impl PlexiApp {
         if elements.is_empty() {
             return;
         }
-        if let Some(bounds) = self.selection_bounds(t) {
-            let opts = RenderOptions { scale: ctx.pixels_per_point(), background: false, ..Default::default() };
-            if let Ok(img) = plexi_core::export::raster::area_rgba(self.page_ref(t), &self.doc.assets, &opts, bounds) {
-                let ci = egui::ColorImage::from_rgba_unmultiplied(
-                    [img.width() as usize, img.height() as usize],
-                    img.as_raw(),
-                );
-                ctx.copy_image(ci);
-            }
-        }
         let n = elements.len();
         self.clip = Some(elements);
         self.toast(if n == 1 { "Copied".to_owned() } else { format!("Copied {n} elements") });
+    }
+
+    /// The snapshot tool: copy `area` of target `t` to the system clipboard as a
+    /// picture, at the size it shows on screen (never below the screen's own pixels).
+    pub fn copy_area(&mut self, ctx: &Context, t: Target, area: plexi_core::Rect) {
+        let ppp = ctx.pixels_per_point();
+        let scale = (ppp * self.view_for(t).zoom).max(ppp);
+        let paper = matches!(t, Target::Page(_));
+        let opts = RenderOptions { scale, background: paper, ..Default::default() };
+        match plexi_core::export::raster::area_rgba(self.page_ref(t), &self.doc.assets, &opts, area) {
+            Ok(img) => {
+                let size = [img.width() as usize, img.height() as usize];
+                ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()));
+                self.toast("Snapshot copied");
+            }
+            Err(e) => self.toast_error(format!("Couldn't take the snapshot: {e}")),
+        }
     }
 
     /// Paste the last copied selection back into the current target, offset so it lands
@@ -1353,8 +1368,10 @@ impl PlexiApp {
         ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
         ctx.send_viewport_cmd(ViewportCommand::Title("Plexi — drawing on screen".into()));
-        if matches!(self.tool, Tool::Lasso | Tool::RectSelect | Tool::Hand | Tool::Text | Tool::Shape(ShapeKind::Line))
-        {
+        if matches!(
+            self.tool,
+            Tool::Lasso | Tool::RectSelect | Tool::Snapshot | Tool::Hand | Tool::Text | Tool::Shape(ShapeKind::Line)
+        ) {
             self.tool = Tool::Pen;
         }
         self.mode = Mode::Overlay(Overlay {
@@ -1775,10 +1792,12 @@ impl PlexiApp {
                 self.finish_crop(false);
             }
         }
+        // While the handwriting window is open, undo works on its samples instead.
+        let hw = self.handwriting.open;
         if cmd_shift(Key::Z) || cmd(Key::Y) {
-            self.redo();
+            if hw { self.handwriting.redo() } else { self.redo() }
         } else if cmd(Key::Z) {
-            self.undo();
+            if hw { self.handwriting.undo() } else { self.undo() }
         }
         if cmd_shift(Key::S) {
             self.save_as();
@@ -1807,7 +1826,7 @@ impl PlexiApp {
             self.duplicate_selection();
         }
         if cmd(Key::C) {
-            self.copy_selection(ctx);
+            self.copy_selection();
         }
         if cmd(Key::V) {
             self.paste_selection(ctx);
@@ -2322,7 +2341,7 @@ mod tests {
             &[(250.0, 250.0), (550.0, 250.0), (550.0, 350.0), (250.0, 350.0), (250.0, 260.0)],
         );
         assert_eq!(h.app.selection.len(), 1);
-        h.app.copy_selection(&ctx);
+        h.app.copy_selection();
         h.app.paste_selection(&ctx);
         assert_eq!(h.elements().len(), 2, "paste added a copy");
         assert_eq!(h.app.selection.len(), 1, "only the pasted copy is selected");
@@ -2339,7 +2358,7 @@ mod tests {
         h.app.selection.clear();
         h.drag(PointerButton::Primary, &[(250.0, 250.0), (550.0, 350.0)]);
         assert_eq!(h.app.selection.len(), 1);
-        h.app.copy_selection(&ctx);
+        h.app.copy_selection();
         let before = h.elements().len();
         h.app.paste_selection(&ctx);
         assert_eq!(h.elements().len(), before + 1, "rect-select copy/paste also adds a copy");
@@ -2669,11 +2688,11 @@ mod tests {
         h.click(at.x, at.y);
         assert_eq!(h.app.selection, HashSet::from([t.id]), "clicking the text selects it");
 
-        // Drag the top-right handle left, shrinking the box to ~60 page units wide.
-        let corner = view.to_screen(origin, [bounds.max[0], bounds.min[1]]);
-        let target = view.to_screen(origin, [bounds.min[0] + 60.0, bounds.min[1]]);
-        let mid = corner + (target - corner) / 2.0;
-        h.drag(PointerButton::Primary, &[(corner.x, corner.y), (mid.x, mid.y), (target.x, target.y)]);
+        // The handles sit on the dashed selection line, halfway down each side. Drag the
+        // right one left, shrinking the box to ~60 page units wide.
+        let (handle, target) = right_handle(&h, &bounds, 60.0);
+        let mid = handle + (target - handle) / 2.0;
+        h.drag(PointerButton::Primary, &[(handle.x, handle.y), (mid.x, mid.y), (target.x, target.y)]);
 
         let Some(Element::Text(resized)) = h.elements().first().cloned() else { panic!("a text box") };
         assert!(resized.wrap.is_some_and(|w| (w - 60.0).abs() < 2.0), "{:?}", resized.wrap);
@@ -2690,6 +2709,126 @@ mod tests {
             None,
             "undo removes the wrap width again"
         );
+    }
+
+    /// The right-hand wrap handle of a selected text box with page bounds `b`, and the
+    /// screen point to drag it to for a box `width` page units wide. The handle sits on
+    /// the dashed selection outline, 4 points outside the text.
+    fn right_handle(h: &Harness, b: &plexi_core::Rect, width: f32) -> (Pos2, Pos2) {
+        let (view, origin) = (h.app.view, h.app.canvas_origin);
+        let mid_y = (b.min[1] + b.max[1]) / 2.0;
+        let handle = view.to_screen(origin, [b.max[0], mid_y]) + egui::vec2(4.0, 0.0);
+        let target = view.to_screen(origin, [b.min[0] + width, mid_y]) + egui::vec2(4.0, 0.0);
+        (handle, target)
+    }
+
+    fn first_text(h: &Harness) -> TextBox {
+        h.elements()
+            .iter()
+            .find_map(|e| match e {
+                Element::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .expect("a text box")
+    }
+
+    #[test]
+    fn the_hand_and_text_tools_resize_text_boxes_too() {
+        let mut h = Harness::new();
+        h.app.tool = Tool::Text;
+        h.click(300.0, 300.0);
+        h.step(vec![Event::Text("hello wide world".into())]);
+        h.click(700.0, 650.0);
+        h.step(vec![]);
+        let t = first_text(&h);
+
+        // Hand: clicking the box selects it, and its side handle then resizes it.
+        h.app.tool = Tool::Hand;
+        let at = h.app.view.to_screen(h.app.canvas_origin, [t.pos[0] + 10.0, t.pos[1] + 10.0]);
+        h.click(at.x, at.y);
+        assert_eq!(h.app.selection, HashSet::from([t.id]));
+        let (handle, target) = right_handle(&h, &t.approx_bounds(), 80.0);
+        let offset = h.app.view.offset;
+        h.drag(PointerButton::Primary, &[(handle.x, handle.y), (target.x, target.y)]);
+        let resized = first_text(&h);
+        assert!(resized.wrap.is_some_and(|w| (w - 80.0).abs() < 2.0), "{:?}", resized.wrap);
+        assert_eq!(h.app.view.offset, offset, "dragging the handle doesn't pan");
+
+        // Text: while typing in a box, its guide carries the same handles; dragging one
+        // resizes the box and typing carries on afterwards.
+        h.app.tool = Tool::Text;
+        h.app.selection.clear();
+        h.app.begin_text_edit(h.app.target(), resized.id);
+        h.step(vec![]);
+        h.step(vec![]);
+        let (id, guide) = h.app.edit_guide.expect("the guide was drawn");
+        assert_eq!(id, resized.id);
+        let from = guide.right_center();
+        let to = from - egui::vec2(20.0 * h.app.view.zoom, 0.0);
+        h.drag(PointerButton::Primary, &[(from.x, from.y), (to.x, to.y)]);
+        let narrower = first_text(&h);
+        assert!(narrower.wrap.is_some_and(|w| (w - 60.0).abs() < 3.0), "{:?}", narrower.wrap);
+        assert_eq!(h.app.editing_text.map(|(_, id)| id), Some(narrower.id), "still typing in it");
+        assert_eq!(h.elements().len(), 1, "no new box was started");
+    }
+
+    #[test]
+    fn clicking_empty_canvas_with_the_hand_deselects() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
+        h.app.tool = Tool::Hand;
+        h.click(400.0, 300.0);
+        assert_eq!(h.app.selection.len(), 1, "clicking the stroke selects it");
+        h.click(400.0, 600.0);
+        assert!(h.app.selection.is_empty(), "clicking off it lets go");
+    }
+
+    #[test]
+    fn the_snapshot_tool_copies_an_area_without_touching_the_page() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
+        h.app.tool = Tool::Snapshot;
+        h.drag(PointerButton::Primary, &[(250.0, 250.0), (400.0, 300.0), (550.0, 350.0)]);
+        assert_eq!(h.elements().len(), 1, "nothing drawn, nothing removed");
+        assert!(h.app.selection.is_empty(), "nothing selected either");
+        assert!(h.app.toast.as_ref().is_some_and(|t| t.text == "Snapshot copied" && !t.error));
+
+        // Copying a selection no longer puts a picture on the clipboard: only the
+        // snapshot tool does that.
+        h.app.toast = None;
+        h.app.tool = Tool::RectSelect;
+        h.drag(PointerButton::Primary, &[(250.0, 250.0), (550.0, 350.0)]);
+        h.app.copy_selection();
+        assert!(h.app.clip.is_some());
+    }
+
+    #[test]
+    fn ctrl_z_in_the_handwriting_window_takes_back_strokes() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0)); // ink on the page
+        h.app.handwriting.open = true;
+        h.step(vec![]);
+        let rect = *h.app.handwriting.boxes.get(&'A').expect("the 'A' box was painted");
+        h.drag(PointerButton::Primary, &line(rect.left() + 4.0, rect.right() - 4.0, rect.center().y));
+        h.drag(PointerButton::Primary, &line(rect.left() + 4.0, rect.right() - 4.0, rect.center().y + 10.0));
+        assert_eq!(h.app.handwriting.samples.strokes('A').len(), 2);
+
+        let ctrl_z =
+            Event::Key { key: Key::Z, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND };
+        h.step(vec![ctrl_z.clone()]);
+        assert_eq!(h.app.handwriting.samples.strokes('A').len(), 1, "one stroke taken back");
+        assert_eq!(h.elements().len(), 1, "the page's ink is left alone");
+        let ctrl_y =
+            Event::Key { key: Key::Y, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND };
+        h.step(vec![ctrl_y]);
+        assert_eq!(h.app.handwriting.samples.strokes('A').len(), 2, "and redone");
+        h.app.handwriting.undo();
+        h.app.handwriting.undo();
+        assert!(h.app.handwriting.samples.strokes('A').is_empty());
+
+        h.app.handwriting.open = false;
+        h.step(vec![ctrl_z]);
+        assert!(h.elements().is_empty(), "with the window closed, Ctrl+Z undoes the page again");
     }
 
     #[test]

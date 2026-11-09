@@ -135,8 +135,34 @@ impl Texture {
     }
 }
 
+/// Apply a frame's texture uploads and patches.
+fn upload(textures: &mut HashMap<TextureId, Arc<Texture>>, delta: &mut egui::TexturesDelta) {
+    for (id, deltas) in std::mem::take(&mut delta.set) {
+        for d in deltas {
+            let egui::ImageData::Color(img) = &d.image;
+            let linear = d.options.magnification == egui::TextureFilter::Linear;
+            match d.pos {
+                None => {
+                    textures.insert(id, Arc::new(Texture { size: img.size, pixels: img.pixels.clone(), linear }));
+                }
+                Some([x0, y0]) => {
+                    let t = Arc::make_mut(textures.get_mut(&id).expect("patch for a known texture"));
+                    for y in 0..img.size[1] {
+                        for x in 0..img.size[0] {
+                            t.pixels[(y0 + y) * t.size[0] + x0 + x] = img.pixels[y * img.size[0] + x];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The app plus everything needed to feed it input and keep its frames.
 struct Recorder {
+    /// What shows through the window while it is transparent (draw-on-screen mode):
+    /// stands in for the desktop, which a test must never capture.
+    backdrop: Option<Arc<Vec<[f32; 4]>>>,
     ctx: Context,
     app: PlexiApp,
     frame: eframe::Frame,
@@ -162,6 +188,7 @@ impl Recorder {
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         let app = PlexiApp::new(&cc, StartOptions { file: None, overlay: false, background: false, shell: false });
         let mut r = Self {
+            backdrop: None,
             ctx,
             app,
             frame: eframe::Frame::_new_kittest(),
@@ -194,26 +221,7 @@ impl Recorder {
             eframe::App::ui(app, ui, frame);
             overlay(ui.ctx(), caption.as_ref().map(|(t, y)| (t.as_str(), *y)), pointer);
         });
-        for (id, deltas) in std::mem::take(&mut out.textures_delta.set) {
-            for d in deltas {
-                let egui::ImageData::Color(img) = &d.image;
-                let linear = d.options.magnification == egui::TextureFilter::Linear;
-                match d.pos {
-                    None => {
-                        self.textures
-                            .insert(id, Arc::new(Texture { size: img.size, pixels: img.pixels.clone(), linear }));
-                    }
-                    Some([x0, y0]) => {
-                        let t = Arc::make_mut(self.textures.get_mut(&id).expect("patch for a known texture"));
-                        for y in 0..img.size[1] {
-                            for x in 0..img.size[0] {
-                                t.pixels[(y0 + y) * t.size[0] + x0 + x] = img.pixels[y * img.size[0] + x];
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        upload(&mut self.textures, &mut out.textures_delta);
         if keep {
             let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
             let textures = self.textures.clone();
@@ -221,8 +229,12 @@ impl Recorder {
             if self.pending.len() >= 12 {
                 self.pending.remove(0).join().unwrap();
             }
+            let backdrop = self.backdrop.clone();
             self.pending.push(std::thread::spawn(move || {
                 let mut canvas = Canvas::new((SIZE[0] * PPP) as usize, (SIZE[1] * PPP) as usize);
+                if let Some(b) = backdrop {
+                    canvas.px.clone_from(&b);
+                }
                 canvas.paint(&prims, &textures);
                 canvas.to_image().save(path).unwrap();
             }));
@@ -400,18 +412,16 @@ fn picture() -> Vec<u8> {
 }
 
 // Toolbar positions (points) in a 960-wide window.
-const PEN: (f32, f32) = (142.0, 34.0);
-const HIGHLIGHTER: (f32, f32) = (178.0, 34.0);
-const SELECT: (f32, f32) = (250.0, 34.0);
-// Rectangle select and Hand sit between Select and Text, so everything from Text on
-// is shifted two icon buttons (36pt each) right of where it used to be.
-const RECT_SELECT: (f32, f32) = (286.0, 34.0);
-const HAND: (f32, f32) = (322.0, 34.0);
-const TEXT: (f32, f32) = (358.0, 34.0);
-const SHAPE: (f32, f32) = (394.0, 34.0);
-const BLACK: (f32, f32) = (434.0, 34.0);
-const BLUE: (f32, f32) = (460.0, 34.0);
-const RED: (f32, f32) = (486.0, 34.0);
+const PEN: (f32, f32) = (124.0, 34.0);
+const HIGHLIGHTER: (f32, f32) = (160.0, 34.0);
+/// The select tools' button; its menu holds lasso, rectangle select and snapshot.
+const SELECT: (f32, f32) = (232.0, 34.0);
+const HAND: (f32, f32) = (268.0, 34.0);
+const TEXT: (f32, f32) = (304.0, 34.0);
+const SHAPE: (f32, f32) = (340.0, 34.0);
+const BLACK: (f32, f32) = (380.0, 34.0);
+const BLUE: (f32, f32) = (406.0, 34.0);
+const RED: (f32, f32) = (432.0, 34.0);
 
 #[test]
 #[ignore = "records docs/tour.gif; needs ffmpeg"]
@@ -515,13 +525,17 @@ fn record_tour() {
     r.snapshot("export2");
     r.finish();
 
-    let gif = root.join("docs/tour.gif");
+    encode_gif(&frames, &root.join("docs/tour.gif"));
+}
+
+/// Turn the numbered frames into a 15 fps GIF with one shared palette.
+fn encode_gif(frames: &Path, gif: &Path) {
     let filter = "fps=15,split[a][b];[a]palettegen=max_colors=256:stats_mode=full[p];                  [b][p]paletteuse=dither=none:diff_mode=rectangle";
     let status = std::process::Command::new("ffmpeg")
         .args(["-loglevel", "error", "-y", "-framerate", "30", "-i"])
         .arg(frames.join("%05d.png"))
         .args(["-vf", filter])
-        .arg(&gif)
+        .arg(gif)
         .status()
         .expect("ffmpeg on PATH");
     assert!(status.success());
@@ -570,7 +584,7 @@ fn preview_tools() {
     r.snapshot("cropped");
 
     // Rectangle select: drag a marquee around everything, then Hand: pan the view.
-    r.click(RECT_SELECT);
+    r.app.tool = crate::app::Tool::RectSelect;
     r.drag(PointerButton::Primary, &[(60.0, 90.0), (760.0, 90.0), (760.0, 520.0), (60.0, 520.0), (60.0, 100.0)], 1);
     r.wait(0.2);
     r.snapshot("rect-select");
@@ -612,4 +626,339 @@ fn preview_tools() {
     // Cancel rather than let the snip capture the real screen.
     r.button(PointerButton::Secondary, true);
     r.finish();
+}
+
+#[test]
+#[ignore = "renders stills of the select-tools menu, hand cursor, text handles and snapshot tool"]
+fn preview_planned() {
+    use crate::app::Tool;
+    let out = std::env::temp_dir().join("plexi-preview-planned");
+    let mut r = Recorder::new(&out);
+    r.wait(0.2);
+    r.click(SELECT);
+    r.wait(0.3);
+    r.snapshot("select-menu");
+    r.click((600.0, 400.0)); // close the menu
+    r.click(TEXT);
+    r.click((300.0, 260.0));
+    r.type_text("Wrap me please");
+    r.wait(0.3);
+    r.snapshot("editing");
+    r.click((700.0, 500.0));
+    r.click(HAND);
+    r.move_to((640.0, 420.0), 0.3);
+    r.snapshot("hand-open");
+    r.click((330.0, 262.0));
+    r.wait(0.2);
+    r.snapshot("text-selected");
+    r.move_to((640.0, 420.0), 0.2);
+    r.button(PointerButton::Primary, true);
+    r.move_to((600.0, 400.0), 0.2);
+    r.snapshot("hand-closed");
+    r.button(PointerButton::Primary, false);
+    r.app.tool = Tool::Snapshot;
+    r.move_to((250.0, 200.0), 0.2);
+    r.button(PointerButton::Primary, true);
+    r.move_to((520.0, 330.0), 0.3);
+    r.snapshot("snapshot-drag");
+    r.button(PointerButton::Primary, false);
+    r.wait(0.3);
+    r.snapshot("snapshot-done");
+    r.app.doc.pages[0].size = plexi_core::PageSize::A4;
+    r.app.config.sheet_guides = false;
+    r.app.config.sheet_numbers = false;
+    r.app.fit_pending = true;
+    r.wait(0.3);
+    r.snapshot("seamless");
+    r.finish();
+}
+
+/// A stand-in desktop for the draw-on-screen scene: a slide app with a bar chart,
+/// painted by egui and rasterized like any app frame.
+fn desktop() -> Vec<[f32; 4]> {
+    use egui::{Align2, FontId, Rect, Stroke};
+    let ctx = Context::default();
+    ctx.set_pixels_per_point(PPP);
+    let mut textures = HashMap::new();
+    let mut prims = Vec::new();
+    for _ in 0..3 {
+        let mut raw = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(SIZE[0], SIZE[1]))),
+            ..Default::default()
+        };
+        raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(PPP);
+        let mut out = ctx.run_ui(raw, |ui| {
+            let p = ui.ctx().layer_painter(egui::LayerId::background());
+            let rgb = Color32::from_rgb;
+            p.rect_filled(Rect::from_min_size(Pos2::ZERO, vec2(SIZE[0], SIZE[1])), 0.0, rgb(0x24, 0x3b, 0x55));
+            let win = Rect::from_min_max(pos2(50.0, 30.0), pos2(910.0, 575.0));
+            p.rect_filled(win, 8.0, rgb(0xe9, 0xeb, 0xef));
+            let bar = Rect::from_min_max(win.min, pos2(win.max.x, win.min.y + 34.0));
+            p.rect_filled(bar, egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 }, rgb(0x2b, 0x2f, 0x36));
+            let title = FontId::proportional(13.0);
+            p.text(pos2(70.0, bar.center().y), Align2::LEFT_CENTER, "Q3 review — Slides", title, Color32::WHITE);
+            for (i, c) in [rgb(0xff, 0x5f, 0x57), rgb(0xfe, 0xbc, 0x2e), rgb(0x28, 0xc8, 0x40)].iter().enumerate() {
+                p.circle_filled(pos2(890.0 - i as f32 * 20.0, bar.center().y), 5.5, *c);
+            }
+            let slide = Rect::from_min_max(pos2(100.0, 95.0), pos2(860.0, 545.0));
+            p.rect_filled(slide, 2.0, Color32::WHITE);
+            p.rect_stroke(slide, 2.0, Stroke::new(1.0, rgb(0xcc, 0xd0, 0xd6)), egui::StrokeKind::Outside);
+            let ink = rgb(0x22, 0x26, 0x2e);
+            p.text(pos2(140.0, 140.0), Align2::LEFT_CENTER, "Revenue by region", FontId::proportional(30.0), ink);
+            let grey = rgb(0x6b, 0x72, 0x80);
+            p.text(pos2(141.0, 174.0), Align2::LEFT_CENTER, "Q3, in $ thousands", FontId::proportional(15.0), grey);
+            let base = 490.0;
+            p.hline(160.0..=820.0, base, Stroke::new(1.5, rgb(0xb8, 0xbe, 0xc8)));
+            let bars = [("North", 120.0), ("South", 175.0), ("West", 262.0), ("East", 148.0)];
+            for (i, (name, v)) in bars.iter().enumerate() {
+                let x = 190.0 + i as f32 * 160.0;
+                let r = Rect::from_min_max(pos2(x, base - v), pos2(x + 90.0, base));
+                p.rect_filled(r, 3.0, rgb(0x5b, 0x7f, 0xb6));
+                let f = FontId::proportional(14.0);
+                p.text(pos2(r.center().x, base + 16.0), Align2::CENTER_CENTER, *name, f.clone(), grey);
+                p.text(pos2(r.center().x, r.top() - 12.0), Align2::CENTER_CENTER, format!("{v}"), f, ink);
+            }
+        });
+        upload(&mut textures, &mut out.textures_delta);
+        prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+    }
+    let mut canvas = Canvas::new((SIZE[0] * PPP) as usize, (SIZE[1] * PPP) as usize);
+    canvas.paint(&prims, &textures);
+    canvas.px
+}
+
+/// A little looping animation: a ball bouncing on a pastel floor.
+fn bouncing_gif() -> Vec<u8> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    let (w, h, n) = (480u32, 360u32, 16);
+    let mut buf = Vec::new();
+    {
+        let mut enc = GifEncoder::new_with_speed(&mut buf, 10);
+        enc.set_repeat(Repeat::Infinite).unwrap();
+        for i in 0..n {
+            let t = i as f32 / n as f32;
+            let height = (t * std::f32::consts::PI).sin(); // 0 on the floor, 1 at the top
+            let squash = if height < 0.15 { 1.0 + (0.15 - height) * 2.0 } else { 1.0 };
+            let (cx, r) = (w as f32 / 2.0, 52.0);
+            let cy = 280.0 - r / squash - height * 184.0;
+            let img = image::RgbaImage::from_fn(w, h, |x, y| {
+                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let ball = ((fx - cx) / (r * squash)).powi(2) + ((fy - cy) / (r / squash)).powi(2);
+                let shadow = ((fx - cx) / (60.0 - height * 24.0)).powi(2) + ((fy - 292.0) / 10.0).powi(2);
+                let px = if ball < 1.0 {
+                    let shine = ((fx - cx + 18.0).powi(2) + (fy - cy + 18.0).powi(2)).sqrt() < 14.0;
+                    if shine { [0xff, 0xd9, 0xd0] } else { [0xf0, 0x5a, 0x4f] }
+                } else if shadow < 1.0 {
+                    [0xc9, 0xbf, 0xe0]
+                } else if fy > 280.0 {
+                    [0xe2, 0xda, 0xf2]
+                } else {
+                    [0xfb, 0xf3, 0xe4]
+                };
+                image::Rgba([px[0], px[1], px[2], 255])
+            });
+            let delay = image::Delay::from_numer_denom_ms(100, 1);
+            enc.encode_frame(image::Frame::from_parts(img, 0, 0, delay)).unwrap();
+        }
+    }
+    buf
+}
+
+/// A Catmull-Rom curve through `pts`, `per` points per span.
+fn curve(pts: &[(f32, f32)], per: usize) -> Vec<(f32, f32)> {
+    let mut out = vec![pts[0]];
+    for i in 0..pts.len() - 1 {
+        let p0 = pts[i.saturating_sub(1)];
+        let (p1, p2) = (pts[i], pts[i + 1]);
+        let p3 = pts[(i + 2).min(pts.len() - 1)];
+        for k in 1..=per {
+            let t = k as f32 / per as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            let f = |a: f32, b: f32, c: f32, d: f32| {
+                0.5 * (2.0 * b
+                    + (c - a) * t
+                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+                    + (3.0 * b - a - 3.0 * c + d) * t3)
+            };
+            out.push((f(p0.0, p1.0, p2.0, p3.0), f(p0.1, p1.1, p2.1, p3.1)));
+        }
+    }
+    out
+}
+
+/// A slightly wobbly loop around (`cx`, `cy`) that overshoots its start, like a quick
+/// circle drawn by hand.
+fn hand_loop(cx: f32, cy: f32, rx: f32, ry: f32) -> Vec<(f32, f32)> {
+    (0..=70)
+        .map(|i| {
+            let a = -2.2 + i as f32 / 70.0 * 7.0;
+            let wob = 1.0 + 0.06 * (a * 2.3).sin() + i as f32 * 0.0012;
+            (cx + a.cos() * rx * wob, cy + a.sin() * ry * wob)
+        })
+        .collect()
+}
+
+fn star(cx: f32, cy: f32, r: f32) -> Vec<(f32, f32)> {
+    let pts: Vec<(f32, f32)> = (0..=10)
+        .map(|i| {
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+            let k = if i % 2 == 0 { r } else { r * 0.42 };
+            (cx + a.cos() * k, cy + a.sin() * k)
+        })
+        .collect();
+    let mut out = Vec::new();
+    for w in pts.windows(2) {
+        for k in 0..6 {
+            let t = k as f32 / 6.0;
+            out.push((w[0].0 + (w[1].0 - w[0].0) * t, w[0].1 + (w[1].1 - w[0].1) * t));
+        }
+    }
+    out.push(pts[10]);
+    out
+}
+
+/// Pen strokes for a few letters, in the handwriting window's box units (`y` 0 at the
+/// top, baseline at 0.8, x-height at 0.3).
+fn glyph(c: char) -> Vec<Vec<(f32, f32)>> {
+    match c {
+        'h' => vec![
+            vec![(0.17, 0.07), (0.16, 0.45), (0.17, 0.8)],
+            vec![(0.17, 0.52), (0.27, 0.35), (0.42, 0.31), (0.53, 0.42), (0.54, 0.62), (0.55, 0.8)],
+        ],
+        'e' => vec![vec![
+            (0.14, 0.58),
+            (0.36, 0.58),
+            (0.55, 0.53),
+            (0.5, 0.36),
+            (0.33, 0.3),
+            (0.16, 0.42),
+            (0.13, 0.62),
+            (0.25, 0.78),
+            (0.42, 0.8),
+            (0.57, 0.72),
+        ]],
+        'l' => vec![vec![(0.28, 0.06), (0.26, 0.4), (0.27, 0.7), (0.34, 0.8), (0.46, 0.76)]],
+        'o' => vec![vec![
+            (0.4, 0.31),
+            (0.2, 0.37),
+            (0.13, 0.58),
+            (0.24, 0.78),
+            (0.43, 0.79),
+            (0.56, 0.6),
+            (0.51, 0.38),
+            (0.36, 0.3),
+            (0.3, 0.34),
+        ]],
+        _ => vec![],
+    }
+}
+
+#[test]
+#[ignore = "records docs/showcase.gif; needs ffmpeg"]
+fn record_showcase() {
+    use crate::app::Tool;
+    use plexi_core::Color;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let frames = std::env::temp_dir().join("plexi-showcase-frames");
+    let mut r = Recorder::new(&frames);
+    let ctx = r.ctx.clone();
+
+    // 1. Draw on screen, right over another app.
+    r.backdrop = Some(Arc::new(desktop()));
+    r.app.enter_overlay(&ctx, false);
+    r.app.tool = Tool::Pen;
+    r.app.pen_color = Color::rgb(0xe5, 0x39, 0x35);
+    r.wait(0.5);
+    r.say("Ctrl+Alt+D: draw right on top of any app");
+    r.wait(0.6);
+    r.drag(PointerButton::Primary, &hand_loop(535.0, 222.0, 78.0, 44.0), 2);
+    r.drag(PointerButton::Primary, &curve(&[(770.0, 190.0), (700.0, 205.0), (628.0, 232.0)], 12), 2);
+    r.drag(PointerButton::Primary, &curve(&[(638.0, 216.0), (627.0, 233.0), (646.0, 244.0)], 6), 1);
+    for word in handwriting(690.0, 160.0, &[4, 3]) {
+        r.drag(PointerButton::Primary, &word, 5);
+    }
+    r.wait(1.0);
+    r.snapshot("overlay");
+    r.app.exit_overlay(&ctx);
+    r.backdrop = None;
+    r.caption = None;
+    r.wait(0.3);
+
+    // 2. Ink stays editable: lasso a doodle, move it, copy and paste it.
+    r.click(PEN);
+    r.click(BLACK);
+    for (i, words) in [&[5usize, 3, 6][..], &[4, 6]].into_iter().enumerate() {
+        for word in handwriting(100.0, 170.0 + i as f32 * 50.0, words) {
+            r.drag(PointerButton::Primary, &word, 8);
+        }
+    }
+    r.click(BLUE);
+    r.drag(PointerButton::Primary, &star(680.0, 210.0, 62.0), 2);
+    r.say("Ink stays editable: lasso it, move it, copy it");
+    r.click(SELECT);
+    r.drag(PointerButton::Primary, &hand_loop(680.0, 215.0, 95.0, 88.0), 2);
+    r.wait(0.3);
+    let path: Vec<(f32, f32)> = curve(&[(680.0, 215.0), (520.0, 330.0), (300.0, 420.0)], 30);
+    r.drag(PointerButton::Primary, &path, 1);
+    r.wait(0.3);
+    r.app.copy_selection();
+    r.wait(0.4);
+    r.app.paste_selection(&ctx);
+    r.wait(0.4);
+    let b = r.app.selection_bounds(r.app.target()).expect("pasted selection");
+    let c = r.app.view.to_screen(r.app.canvas_origin, b.center());
+    let path = curve(&[(c.x, c.y), (c.x + 150.0, c.y + 40.0), (720.0, 420.0)], 30);
+    r.drag(PointerButton::Primary, &path, 1);
+    r.wait(0.8);
+    r.snapshot("lasso");
+
+    // 3. Grab the page aside, then drop in an animated GIF.
+    r.click(HAND);
+    let pan = curve(&[(820.0, 300.0), (500.0, 290.0), (220.0, 300.0)], 30);
+    r.drag(PointerButton::Primary, &pan, 1);
+    r.say("Animated GIFs play right on the page");
+    let at = r.app.view.to_page(r.app.canvas_origin, pos2(640.0, 200.0));
+    r.app.insert_image(bouncing_gif(), Some(at), &ctx);
+    r.wait(1.0);
+    // Pull its corner out to a better size.
+    let b = r.app.selection_bounds(r.app.target()).expect("the GIF");
+    let corner = r.app.view.to_screen(r.app.canvas_origin, b.max);
+    let grow: Vec<(f32, f32)> = (0..=30).map(|i| (corner.x + i as f32 * 4.4, corner.y + i as f32 * 3.3)).collect();
+    r.drag(PointerButton::Primary, &grow, 1);
+    r.wait(2.0);
+    r.snapshot("gif");
+
+    // 4. Teach it your handwriting, then type in it.
+    r.say("Write each letter once...");
+    r.app.handwriting.open = true;
+    r.wait(0.5);
+    for ch in ['h', 'e', 'l', 'o'] {
+        let rect = r.app.handwriting.boxes[&ch];
+        for stroke in glyph(ch) {
+            let pts: Vec<(f32, f32)> = curve(&stroke, 6)
+                .into_iter()
+                .map(|(x, y)| (rect.left() + x * rect.height(), rect.top() + y * rect.height()))
+                .collect();
+            r.drag(PointerButton::Primary, &pts, 2);
+        }
+    }
+    r.wait(0.3);
+    r.snapshot("glyphs");
+    let save = r.app.handwriting.save_button.expect("save button").center();
+    r.click((save.x, save.y));
+    r.wait(0.4);
+    r.app.handwriting.open = false;
+    r.say("...then type in your own handwriting");
+    r.click(TEXT);
+    r.click((300.0, 395.0));
+    r.app.apply_text_style(|t| {
+        t.font = Some(plexi_core::handwriting::FAMILY_NAME.into());
+        t.size = 64.0;
+    });
+    r.type_text("hello hello");
+    r.wait(2.0);
+    r.snapshot("typed");
+    r.finish();
+
+    encode_gif(&frames, &root.join("docs/showcase.gif"));
 }

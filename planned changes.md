@@ -5,10 +5,10 @@
 - [x] Rectangle select tool (alongside the freeform lasso) to select an area, copy it and paste it elsewhere
 - [x] Hand tool: a neutral pointer for panning and grabbing, without having to pick the pen or the lasso
 - [x] Handwriting font: a tab where you write samples with the pen, saved as your own font to type in
-- [ ] Make the text boxes' resize drag points sit in the middle of the dotted line, not the inside.
-- [ ] None of the cursors i tried let me resize the text boxes. Allow text and hand tool at least to grab them
-- [ ] Let's next all the select tools, and scrap the current rectangle screenshot function. Keep it as just a selector but let's make a "snapshot" tool under that next that just screenshots what we select on the canvas.
-- [ ] Allow ctrl z in my handwriting font
-- [ ] Make the hand tool look better
-- [ ] The hand cursor should look like a hand, i just get the transform axis and clicking off an object doesnt deselect it.
-- [ ] When there are no page numbers or borders, i do not want the shadow around the original page, i want it to be seamless
+- [x] Make the text boxes' resize drag points sit in the middle of the dotted line, not the inside.
+- [x] None of the cursors i tried let me resize the text boxes. Allow text and hand tool at least to grab them
+- [x] Let's next all the select tools, and scrap the current rectangle screenshot function. Keep it as just a selector but let's make a "snapshot" tool under that next that just screenshots what we select on the canvas.
+- [x] Allow ctrl z in my handwriting font
+- [x] Make the hand tool look better
+- [x] The hand cursor should look like a hand, i just get the transform axis and clicking off an object doesnt deselect it.
+- [x] When there are no page numbers or borders, i do not want the shadow around the original page, i want it to be seamless

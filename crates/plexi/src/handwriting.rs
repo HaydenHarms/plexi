@@ -31,6 +31,11 @@ pub struct HandwritingState {
     /// frame's input can be matched against it. Tests use this to find a box to write
     /// in without hard-coding the window's layout.
     pub boxes: HashMap<char, Rect>,
+    /// Where the Save font button was painted last frame, for the same reason.
+    pub save_button: Option<Rect>,
+    /// Earlier versions of `samples`, for Ctrl+Z while the window is open.
+    undo: Vec<Samples>,
+    redo: Vec<Samples>,
 }
 
 impl Default for HandwritingState {
@@ -40,6 +45,9 @@ impl Default for HandwritingState {
             samples: handwriting::load(&config::handwriting_path()),
             drawing: None,
             boxes: HashMap::new(),
+            save_button: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
         }
     }
 }
@@ -50,6 +58,25 @@ impl HandwritingState {
     pub fn install_saved_font(&self) {
         if !self.samples.is_empty() {
             plexi_core::fonts::set_handwriting(Some(handwriting::build_font(&self.samples)));
+        }
+    }
+
+    /// Remember the samples as they are now, before changing them.
+    fn checkpoint(&mut self) {
+        self.undo.push(self.samples.clone());
+        self.redo.clear();
+    }
+
+    /// Ctrl+Z inside the window: take back the last stroke, clear or clear-all.
+    pub fn undo(&mut self) {
+        if let Some(prev) = self.undo.pop() {
+            self.redo.push(std::mem::replace(&mut self.samples, prev));
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(next) = self.redo.pop() {
+            self.undo.push(std::mem::replace(&mut self.samples, next));
         }
     }
 
@@ -126,6 +153,7 @@ fn capture(app: &mut PlexiApp, ui: &Ui, response: &Response, rect: Rect, c: char
         && *dc == c
         && let Some((_, b)) = app.handwriting.drawing.take()
     {
+        app.handwriting.checkpoint();
         app.handwriting.samples.push_stroke(c, b.finish());
     }
 }
@@ -141,12 +169,17 @@ fn glyph_box(app: &mut PlexiApp, ui: &mut Ui, c: char) {
         capture(app, ui, &response, rect, c);
         ui.horizontal(|ui| {
             ui.add_space((rect.width() - 18.0).max(0.0) / 2.0);
-            if ui.small_button("×").on_hover_text(format!("Clear '{c}'")).clicked() {
+            let has_ink = !app.handwriting.samples.strokes(c).is_empty();
+            if ui.small_button("×").on_hover_text(format!("Clear '{c}'")).clicked() && has_ink {
+                app.handwriting.checkpoint();
                 app.handwriting.samples.clear_glyph(c);
             }
         });
     });
 }
+
+/// Glyph boxes per row in the handwriting window.
+const GRID_COLUMNS: usize = 11;
 
 pub fn window(app: &mut PlexiApp, ctx: &Context) {
     if !app.handwriting.open {
@@ -155,31 +188,45 @@ pub fn window(app: &mut PlexiApp, ctx: &Context) {
     let mut open = true;
     let mut clear_all = false;
     let mut save_now = false;
-    egui::Window::new("My handwriting").open(&mut open).default_width(620.0).vscroll(true).show(ctx, |ui| {
-        ui.label(
-            "Write each character below with the pen (or mouse). Skip any you like — they'll just \
-             use the default font instead.",
-        );
-        ui.horizontal(|ui| {
-            if ui.button("Clear all").clicked() {
-                clear_all = true;
-            }
-            let has_ink = !app.handwriting.samples.is_empty();
-            if ui.add_enabled(has_ink, egui::Button::new(egui::RichText::new("Save font").strong())).clicked() {
-                save_now = true;
-            }
-        });
-        ui.separator();
-        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
+    egui::Window::new("My handwriting")
+        .open(&mut open)
+        .default_width(620.0)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.content_rect().center())
+        .vscroll(true)
+        .show(ctx, |ui| {
+            ui.label(
+                "Write each character below with the pen (or mouse). Skip any you like — they'll just \
+             use the default font instead. Ctrl+Z takes back the last stroke.",
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Clear all").clicked() {
+                    clear_all = true;
+                }
+                let has_ink = !app.handwriting.samples.is_empty();
+                let save = ui.add_enabled(has_ink, egui::Button::new(egui::RichText::new("Save font").strong()));
+                app.handwriting.save_button = Some(save.rect);
+                if save.clicked() {
+                    save_now = true;
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                // Fixed rows: a wrapped layout inside an auto-sized window just grows the
+                // window until every box fits on one row.
                 ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                for c in GRID_CHARS.chars() {
-                    glyph_box(app, ui, c);
+                let chars: Vec<char> = GRID_CHARS.chars().collect();
+                for row in chars.chunks(GRID_COLUMNS) {
+                    ui.horizontal(|ui| {
+                        for &c in row {
+                            glyph_box(app, ui, c);
+                        }
+                    });
                 }
             });
         });
-    });
-    if clear_all {
+    if clear_all && !app.handwriting.samples.is_empty() {
+        app.handwriting.checkpoint();
         app.handwriting.samples = Samples::default();
     }
     if save_now {

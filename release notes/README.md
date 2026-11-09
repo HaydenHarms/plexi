@@ -2,6 +2,7 @@
 
 One file per release, named after its tag (`v0.5.0.md`). When a `vX.Y.Z` tag is pushed, the release workflow puts that file at the top of the GitHub release, above the download list. Write the file for the next version before tagging.
 
+- [0.6.0](v0.6.0.md) (not released yet): snapshot tool, select tools menu, hand cursor, text box handles
 - [0.5.0](v0.5.0.md): handwriting font, animated GIFs, rectangle select, hand tool, copy and paste
 - [0.4.0](v0.4.0.md): snipping, image cropping, text styles, printing some sheets
 - [0.3.1](v0.3.1.md): fill around the page with paper color

@@ -76,6 +76,7 @@ pub enum Icon {
     Eraser,
     Lasso,
     RectSelect,
+    Snapshot,
     Hand,
     Text,
     Line,
@@ -103,6 +104,7 @@ fn tool_icon(t: Tool) -> Icon {
         Tool::Eraser => Icon::Eraser,
         Tool::Lasso => Icon::Lasso,
         Tool::RectSelect => Icon::RectSelect,
+        Tool::Snapshot => Icon::Snapshot,
         Tool::Hand => Icon::Hand,
         Tool::Text => Icon::Text,
         Tool::Shape(ShapeKind::Line) => Icon::Line,
@@ -151,14 +153,16 @@ pub fn paint_icon(p: &Painter, r: Rect, icon: Icon, c: Color32) {
             let c = [at(2.5, 3.0), at(13.5, 3.0), at(13.5, 13.0), at(2.5, 13.0), at(2.5, 3.0)];
             p.extend(EShape::dashed_line(&c, st, 2.2 * s, 1.6 * s));
         }
-        Icon::Hand => {
-            // Palm, with four fingers above and a thumb out to the side.
-            p.rect_stroke(Rect::from_min_max(at(4.0, 7.5), at(12.0, 13.0)), 2.0 * s, st, StrokeKind::Middle);
-            for x in [5.5, 7.5, 9.5, 11.0] {
-                line(&[(x, 7.5), (x, 2.5)]);
+        Icon::Snapshot => {
+            // Corner brackets of a picked area, with a camera lens inside.
+            for (x, y, dx, dy) in
+                [(2.5, 2.5, 1.0, 1.0), (13.5, 2.5, -1.0, 1.0), (13.5, 13.5, -1.0, -1.0), (2.5, 13.5, 1.0, -1.0)]
+            {
+                line(&[(x, y + 3.5 * dy), (x, y), (x + 3.5 * dx, y)]);
             }
-            line(&[(4.0, 9.5), (1.5, 8.0), (2.3, 6.3), (4.0, 7.5)]);
+            p.circle_stroke(at(8.0, 8.0), 2.6 * s, st);
         }
+        Icon::Hand => paint_hand(p, r, false, st),
         Icon::Text => {
             line(&[(3.0, 4.0), (3.0, 2.5), (13.0, 2.5), (13.0, 4.0)]);
             line(&[(8.0, 2.5), (8.0, 13.5)]);
@@ -242,6 +246,66 @@ pub fn paint_icon(p: &Painter, r: Rect, icon: Icon, c: Color32) {
     }
 }
 
+/// Points around a circle on the 16x16 icon grid, from angle `a0` to `a1` (radians,
+/// y pointing down).
+fn arc_pts(cx: f32, cy: f32, r: f32, a0: f32, a1: f32) -> impl Iterator<Item = (f32, f32)> {
+    (0..=8).map(move |k| {
+        let a = a0 + (a1 - a0) * k as f32 / 8.0;
+        (cx + r * a.cos(), cy + r * a.sin())
+    })
+}
+
+/// The hand tool's outline on the 16x16 icon grid, as polylines: an open hand with
+/// spread fingers and the thumb out, or (`closed`) a fist gripping something.
+fn hand_paths(closed: bool) -> Vec<Vec<(f32, f32)>> {
+    use std::f32::consts::PI;
+    let deg = |d: f32| d * PI / 180.0;
+    // A finger from `bottom` up to a rounded tip, then back down its other side.
+    let finger = |path: &mut Vec<(f32, f32)>, x0: f32, x1: f32, top: f32, bottom: f32| {
+        let r = (x1 - x0) / 2.0;
+        path.push((x0, bottom));
+        path.extend(arc_pts(x0 + r, top, r, PI, 2.0 * PI));
+        path.push((x1, bottom));
+    };
+    let mut hand = vec![(6.2, 14.5), (4.9, 13.7), (4.1, 12.3)];
+    let mut extra = Vec::new();
+    if closed {
+        // Curled fingers: a row of knuckles, with the thumb folded across them.
+        hand.push((4.5, 9.0));
+        finger(&mut hand, 4.5, 6.5, 7.6, 9.0);
+        finger(&mut hand, 6.5, 8.5, 6.8, 8.8);
+        finger(&mut hand, 8.5, 10.5, 7.0, 9.0);
+        finger(&mut hand, 10.5, 12.3, 7.8, 7.8);
+        hand.extend([(12.3, 10.5), (12.0, 12.3)]);
+        extra = vec![(4.3, 11.2), (6.8, 10.1), (8.6, 10.5)];
+    } else {
+        // The thumb, out to the left, then four spread fingers.
+        hand.push((3.83, 11.24));
+        hand.extend(arc_pts(2.7, 8.3, 1.0, deg(140.0), deg(320.0)));
+        hand.push((4.6, 9.0));
+        finger(&mut hand, 4.6, 6.6, 4.2, 7.6);
+        finger(&mut hand, 6.6, 8.6, 3.0, 7.4);
+        finger(&mut hand, 8.6, 10.6, 3.6, 7.6);
+        finger(&mut hand, 10.6, 12.4, 5.2, 5.2);
+        hand.extend([(12.4, 10.2), (12.0, 12.3)]);
+    }
+    hand.extend([(10.9, 13.8), (9.6, 14.5), (6.2, 14.5)]);
+    let mut paths = vec![hand];
+    if !extra.is_empty() {
+        paths.push(extra);
+    }
+    paths
+}
+
+/// Paint the hand in `r` (a square): the toolbar icon, and the hand tool's cursor.
+pub fn paint_hand(p: &Painter, r: Rect, closed: bool, stroke: Stroke) {
+    let s = r.width() / 16.0;
+    for path in hand_paths(closed) {
+        let pts = path.into_iter().map(|(x, y)| pos2(r.left() + x * s, r.top() + y * s)).collect();
+        p.add(EShape::line(pts, stroke));
+    }
+}
+
 fn icon_button(ui: &mut Ui, icon: Icon, selected: bool, tip: &str) -> Response {
     let t = theme(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::click());
@@ -297,7 +361,33 @@ fn vsep(ui: &mut Ui) {
 // ----- toolbars ---------------------------------------------------------------------
 
 fn tool_buttons(app: &mut PlexiApp, ui: &mut Ui, overlay: bool) {
-    for tool in [Tool::Pen, Tool::Highlighter, Tool::Eraser, Tool::Lasso, Tool::RectSelect, Tool::Hand, Tool::Text] {
+    for tool in [Tool::Pen, Tool::Highlighter, Tool::Eraser] {
+        if icon_button(ui, tool_icon(tool), app.tool == tool, tool.label()).clicked() {
+            app.tool = tool;
+        }
+    }
+    // The select tools share one button: it shows the one last picked, and its menu
+    // has all three.
+    let selects = [Tool::Lasso, Tool::RectSelect, Tool::Snapshot];
+    let last_select = Id::unique("last-select");
+    let current = if selects.contains(&app.tool) {
+        app.tool
+    } else {
+        ui.data(|d| d.get_temp::<Tool>(last_select)).unwrap_or(Tool::Lasso)
+    };
+    let resp = icon_button(ui, tool_icon(current), selects.contains(&app.tool), "Select tools");
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.horizontal(|ui| {
+            for tool in selects {
+                if icon_button(ui, tool_icon(tool), app.tool == tool, tool.label()).clicked() {
+                    app.tool = tool;
+                    ui.data_mut(|d| d.insert_temp(last_select, tool));
+                    ui.close();
+                }
+            }
+        });
+    });
+    for tool in [Tool::Hand, Tool::Text] {
         if icon_button(ui, tool_icon(tool), app.tool == tool, tool.label()).clicked() {
             app.tool = tool;
         }
@@ -340,7 +430,7 @@ const TEXT_SIZES: [f32; 14] = [10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 28.0, 3
 fn text_bar(app: &mut PlexiApp, ctx: &Context, y: f32) {
     let text = app.tool == Tool::Text
         || app.editing_text.is_some()
-        || (matches!(app.tool, Tool::Lasso | Tool::RectSelect) && app.text_selected());
+        || (matches!(app.tool, Tool::Lasso | Tool::RectSelect | Tool::Hand) && app.text_selected());
     if !text {
         return;
     }
@@ -1041,6 +1131,7 @@ fn commands(app: &PlexiApp) -> Vec<(Cmd, String, String)> {
         Tool::Eraser,
         Tool::Lasso,
         Tool::RectSelect,
+        Tool::Snapshot,
         Tool::Hand,
         Tool::Text,
         Tool::Shape(ShapeKind::Line),
@@ -1120,7 +1211,7 @@ fn run_cmd(app: &mut PlexiApp, ctx: &Context, cmd: Cmd) {
         Cmd::SelectAll => app.select_all(),
         Cmd::Delete => app.delete_selection(),
         Cmd::Duplicate => app.duplicate_selection(),
-        Cmd::Copy => app.copy_selection(ctx),
+        Cmd::Copy => app.copy_selection(),
         Cmd::PasteSelection => app.paste_selection(ctx),
         Cmd::PartialEraser => app.config.eraser_partial = !app.config.eraser_partial,
         Cmd::Settings => app.settings_open = true,
@@ -1795,12 +1886,14 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
             ("Command palette", "Ctrl+K".into()),
             ("Pen · Highlighter · Eraser", "P · H · E".into()),
             ("Select (lasso) · Rectangle select · Hand · Text", "S · M · G · T".into()),
+            ("Snapshot an area of the page → clipboard", "Snapshot tool (in the select tools menu)".into()),
             ("Line · Arrow · Rect · Ellipse", "L · A · R · O".into()),
             ("Colors", "1 – 9".into()),
             ("Thinner / thicker", "[ · ]".into()),
             ("Erase with any tool", "Middle-drag (or pen barrel button)".into()),
             ("Menu: lock image, arrange, paper, delete page", "Right-click (no drag)".into()),
-            ("Resize an image", "Select it, drag a corner (Shift: free)".into()),
+            ("Resize an image", "Select it, drag a corner (Shift: keep proportions)".into()),
+            ("Set a text box's wrap width", "Drag the handle on its left or right side".into()),
             ("Crop an image", "Right-click it → Crop image".into()),
             ("Edit a text box", "Double-click it (Select tool)".into()),
             ("Pan", "Right-drag · Space+drag · Shift+scroll · two fingers".into()),
