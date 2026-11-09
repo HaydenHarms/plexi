@@ -1,2 +1,3 @@
 - [ ] Let's add drag placement of selected areas on the print preview
 - [ ] Allow for multiple, named handwriting fonts
+- [ ] Allow font file format exporting
