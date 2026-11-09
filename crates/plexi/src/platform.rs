@@ -101,6 +101,17 @@ mod imp {
 
     /// Grab a screen area as straight RGBA.
     pub fn capture(r: PxRect) -> Option<image::RgbaImage> {
+        let mut buf = Vec::new();
+        capture_bgra(r, &mut buf)?;
+        for px in buf.as_chunks_mut::<4>().0 {
+            px.swap(0, 2); // BGRA -> RGBA
+        }
+        image::RgbaImage::from_raw(r.w as u32, r.h as u32, buf)
+    }
+
+    /// Grab a screen area with GDI into `buf`, as blue-green-red-255 bytes, rows top to
+    /// bottom.
+    fn capture_bgra(r: PxRect, buf: &mut Vec<u8>) -> Option<()> {
         if r.w <= 0 || r.h <= 0 {
             return None;
         }
@@ -122,7 +133,8 @@ mod imp {
                 },
                 ..Default::default()
             };
-            let mut buf = vec![0u8; (r.w * r.h * 4) as usize];
+            buf.clear();
+            buf.resize((r.w * r.h * 4) as usize, 0);
             let rows = GetDIBits(mem, bmp, 0, r.h as u32, Some(buf.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS);
             SelectObject(mem, old);
             let _ = DeleteObject(bmp);
@@ -132,10 +144,160 @@ mod imp {
                 return None;
             }
             for px in buf.as_chunks_mut::<4>().0 {
-                px.swap(0, 2); // BGRA -> RGBA
                 px[3] = 255;
             }
-            image::RgbaImage::from_raw(r.w as u32, r.h as u32, buf)
+            Some(())
+        }
+    }
+
+    /// Captures one monitor over and over for a recording: with DXGI Desktop
+    /// Duplication (the GPU's own copy of the screen, fast even at 4K), or GDI if that
+    /// isn't available. Like GDI, it leaves out windows excluded from capture.
+    pub struct ScreenGrabber {
+        rect: PxRect,
+        dup: Option<Duplication>,
+        /// Desktop Duplication failed to start; don't keep trying every frame.
+        gdi_only: bool,
+        buf: Vec<u8>,
+    }
+
+    impl ScreenGrabber {
+        pub fn new(rect: PxRect) -> Self {
+            Self { rect, dup: None, gdi_only: false, buf: Vec::new() }
+        }
+
+        pub fn rect(&self) -> PxRect {
+            self.rect
+        }
+
+        /// The monitor now, as `w * h` blue-green-red-255 pixels, rows top to bottom.
+        pub fn grab(&mut self) -> Option<&[u8]> {
+            if !self.gdi_only && self.dup.is_none() {
+                self.dup = Duplication::new(self.rect);
+                self.gdi_only = self.dup.is_none();
+            }
+            if let Some(d) = &mut self.dup {
+                if d.next(&mut self.buf).is_some() {
+                    return Some(&self.buf);
+                }
+                // Lost (a display change, a secure desktop): start over next frame.
+                self.dup = None;
+            }
+            capture_bgra(self.rect, &mut self.buf)?;
+            Some(&self.buf)
+        }
+    }
+
+    struct Duplication {
+        context: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+        device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        dup: windows::Win32::Graphics::Dxgi::IDXGIOutputDuplication,
+        staging: Option<windows::Win32::Graphics::Direct3D11::ID3D11Texture2D>,
+        size: [u32; 2],
+    }
+
+    impl Duplication {
+        /// Duplicate the output that covers exactly `rect`, unrotated and in 8-bit BGRA.
+        fn new(rect: PxRect) -> Option<Self> {
+            use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
+            use windows::Win32::Graphics::Direct3D11::*;
+            use windows::Win32::Graphics::Dxgi::*;
+            use windows::core::Interface;
+            unsafe {
+                let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+                for a in 0.. {
+                    let Ok(adapter) = factory.EnumAdapters1(a) else { break };
+                    for o in 0.. {
+                        let Ok(output) = adapter.EnumOutputs(o) else { break };
+                        let Ok(desc) = output.GetDesc() else { continue };
+                        let r = desc.DesktopCoordinates;
+                        let same = PxRect { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top } == rect;
+                        let upright = [Common::DXGI_MODE_ROTATION_IDENTITY, Common::DXGI_MODE_ROTATION_UNSPECIFIED]
+                            .contains(&desc.Rotation);
+                        if !same || !upright {
+                            continue;
+                        }
+                        let mut device = None;
+                        let mut context = None;
+                        D3D11CreateDevice(
+                            &adapter,
+                            D3D_DRIVER_TYPE_UNKNOWN,
+                            None,
+                            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                            None,
+                            D3D11_SDK_VERSION,
+                            Some(&mut device),
+                            None,
+                            Some(&mut context),
+                        )
+                        .ok()?;
+                        let (device, context) = (device?, context?);
+                        let dup = output.cast::<IDXGIOutput1>().ok()?.DuplicateOutput(&device).ok()?;
+                        let d = dup.GetDesc();
+                        if d.ModeDesc.Format != windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM {
+                            return None; // e.g. HDR: GDI copes with that
+                        }
+                        let size = [d.ModeDesc.Width, d.ModeDesc.Height];
+                        return Some(Self { context, device, dup, staging: None, size });
+                    }
+                }
+                None
+            }
+        }
+
+        /// The latest screen into `buf`; if nothing changed since last time, `buf` is
+        /// left as it is. `None` if duplication stopped working.
+        fn next(&mut self, buf: &mut Vec<u8>) -> Option<()> {
+            use windows::Win32::Graphics::Direct3D11::*;
+            use windows::Win32::Graphics::Dxgi::*;
+            use windows::core::Interface;
+            let [w, h] = self.size;
+            let len = (w * h * 4) as usize;
+            unsafe {
+                let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+                let mut resource = None;
+                // The first frame may take a moment to arrive; after that, no new frame
+                // just means the screen didn't change.
+                let wait = if buf.len() == len { 0 } else { 250 };
+                match self.dup.AcquireNextFrame(wait, &mut info, &mut resource) {
+                    Ok(()) => {}
+                    Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT && buf.len() == len => return Some(()),
+                    Err(_) => return None,
+                }
+                let r = (|| -> Option<()> {
+                    let texture: ID3D11Texture2D = resource?.cast().ok()?;
+                    if self.staging.is_none() {
+                        let mut desc = D3D11_TEXTURE2D_DESC::default();
+                        texture.GetDesc(&mut desc);
+                        desc.Usage = D3D11_USAGE_STAGING;
+                        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+                        desc.BindFlags = 0;
+                        desc.MiscFlags = 0;
+                        desc.MipLevels = 1;
+                        desc.ArraySize = 1;
+                        let mut staging = None;
+                        self.device.CreateTexture2D(&desc, None, Some(&mut staging)).ok()?;
+                        self.staging = staging;
+                    }
+                    let staging = self.staging.as_ref()?;
+                    self.context.CopyResource(staging, &texture);
+                    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                    self.context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).ok()?;
+                    buf.resize(len, 0);
+                    let pitch = mapped.RowPitch as usize;
+                    let src = std::slice::from_raw_parts(mapped.pData as *const u8, pitch * h as usize);
+                    for (y, row) in buf.chunks_exact_mut((w * 4) as usize).enumerate() {
+                        row.copy_from_slice(&src[y * pitch..y * pitch + row.len()]);
+                    }
+                    self.context.Unmap(staging, 0);
+                    for px in buf.as_chunks_mut::<4>().0 {
+                        px[3] = 255;
+                    }
+                    Some(())
+                })();
+                let _ = self.dup.ReleaseFrame();
+                r
+            }
         }
     }
 
@@ -298,6 +460,19 @@ mod imp {
     pub fn attach_parent_console() {}
     pub fn cursor_in_window(_: isize) -> Option<[f32; 2]> {
         None
+    }
+    /// Screen capture for recordings is Windows-only for now.
+    pub struct ScreenGrabber(PxRect);
+    impl ScreenGrabber {
+        pub fn new(rect: PxRect) -> Self {
+            Self(rect)
+        }
+        pub fn rect(&self) -> PxRect {
+            self.0
+        }
+        pub fn grab(&mut self) -> Option<&[u8]> {
+            None
+        }
     }
     /// Unknown here: Plexi's own copy is then always the one pasted.
     pub fn clipboard_sequence() -> Option<u32> {

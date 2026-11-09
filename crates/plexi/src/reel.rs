@@ -638,8 +638,10 @@ fn preview_trail() {
     r.app.toggle_recording(&ctx);
     r.app.toast = None;
     r.move_to((200.0, 400.0), 0.1);
-    for (x, y) in curve(&[(200.0, 400.0), (380.0, 250.0), (560.0, 330.0), (700.0, 220.0)], 10) {
-        r.move_to((x, y), 0.012);
+    // A quick flick, sampled about 30 times a second like a real recording: the
+    // samples land far apart.
+    for (x, y) in curve(&[(200.0, 400.0), (380.0, 250.0), (560.0, 330.0), (700.0, 220.0)], 3) {
+        r.move_to((x, y), 0.033);
     }
     r.snapshot("trail-moving");
     r.wait(0.6);

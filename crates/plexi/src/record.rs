@@ -5,8 +5,9 @@
 //! ([`egui::Context::request_screenshot`]). In the notebook that is the frame. On screen,
 //! Plexi's window is left out of screen captures for as long as the recording runs, so
 //! the monitor can be captured as it looks underneath and Plexi's own layer (the ink,
-//! the toolbar) laid over it. A worker thread composes and encodes the frames; when it
-//! falls behind, frames are dropped rather than piling up in memory.
+//! the toolbar) laid over it. Worker threads compose and encode the frames, one stage
+//! each so they overlap; when they fall behind, frames are dropped rather than piling
+//! up in memory.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -77,49 +78,104 @@ impl Recording {
     }
 }
 
-/// Encode frames until the sender is dropped.
+/// Encode frames until the sender is dropped. Two stages, each on its own thread so
+/// they overlap: this one captures the screen under the frame (when drawing on screen)
+/// and composes the two straight into the encoder's pixel format; the other encodes.
 fn encode(rx: mpsc::Receiver<Frame>, path: &Path) -> Result<(), String> {
-    let mut video: Option<(VideoWriter, [u32; 2])> = None;
-    let mut bgra = Vec::new();
-    let mut first = None;
-    for frame in rx {
-        let picture = compose(&frame);
-        let size = match &video {
-            Some((_, size)) => *size,
-            None => {
-                let size = video_size([picture.width(), picture.height()]);
-                video = Some((VideoWriter::create(path, size[0], size[1], FPS)?, size));
-                size
+    let (to_encoder, frames) = mpsc::sync_channel::<(f64, Vec<u8>, [u32; 2])>(2);
+    let (recycle, spare) = mpsc::channel::<Vec<u8>>();
+    let out = path.to_owned();
+    let encoder = std::thread::spawn(move || -> Result<(), String> {
+        let mut video: Option<(VideoWriter, [u32; 2])> = None;
+        let mut first = None;
+        let mut scaled = Vec::new();
+        for (time, bgra, size) in frames {
+            let video_size = match &video {
+                Some((_, s)) => *s,
+                None => {
+                    let s = video_size(size);
+                    video = Some((VideoWriter::create(&out, s[0], s[1], FPS)?, s));
+                    s
+                }
+            };
+            let data = if size == video_size {
+                &bgra[..]
+            } else {
+                // The window changed size, or the recording moved between the notebook
+                // and the screen: scale to fit the video.
+                let mut rgba = bgra.clone();
+                for px in rgba.as_chunks_mut::<4>().0 {
+                    px.swap(0, 2);
+                }
+                let pic = image::RgbaImage::from_raw(size[0], size[1], rgba).ok_or("bad frame")?;
+                fit_bgra(&pic, video_size, &mut scaled);
+                &scaled[..]
+            };
+            let t0 = *first.get_or_insert(time);
+            if let Some((v, _)) = &mut video {
+                v.write(data, time - t0, 1.0 / FPS as f64)?;
             }
+            let _ = recycle.send(bgra);
+        }
+        match video {
+            Some((v, _)) => v.finish(),
+            None => Err("nothing was recorded".into()),
+        }
+    });
+
+    let mut grabber: Option<platform::ScreenGrabber> = None;
+    for frame in rx {
+        let [w, h] = frame.layer.size;
+        let under = match frame.under {
+            Some(rect) => {
+                if grabber.as_ref().is_none_or(|g| g.rect() != rect) {
+                    grabber = Some(platform::ScreenGrabber::new(rect));
+                }
+                grabber.as_mut().and_then(|g| g.grab()).filter(|b| b.len() == w * h * 4)
+            }
+            None => None,
         };
-        fit_bgra(&picture, size, &mut bgra);
-        let t0 = *first.get_or_insert(frame.time);
-        if let Some((v, _)) = &mut video {
-            v.write(&bgra, frame.time - t0, 1.0 / FPS as f64)?;
+        let mut buf = spare.try_recv().unwrap_or_default();
+        compose_bgra(&frame.layer, under, &mut buf);
+        if to_encoder.send((frame.time, buf, [w as u32, h as u32])).is_err() {
+            break; // the encoder stopped: its error says why
         }
     }
-    match video {
-        Some((v, _)) => v.finish(),
-        None => Err("nothing was recorded".into()),
-    }
+    drop(to_encoder);
+    encoder.join().map_err(|_| "the encoder crashed".to_owned())?
 }
 
-/// The frame as an opaque picture: Plexi's layer over the captured monitor when
-/// drawing on screen, or over black (the notebook paints its own background anyway).
-fn compose(frame: &Frame) -> image::RgbaImage {
-    let [w, h] = frame.layer.size;
-    let mut under = frame
-        .under
-        .and_then(platform::capture)
-        .filter(|u| (u.width() as usize, u.height() as usize) == (w, h))
-        .unwrap_or_else(|| image::RgbaImage::from_pixel(w as u32, h as u32, image::Rgba([0, 0, 0, 255])));
-    for (dst, src) in under.pixels_mut().zip(frame.layer.pixels.iter()) {
-        // `src` is premultiplied: src + dst * (1 - alpha).
-        let keep = 255 - src.a() as u32;
-        let mix = |s: u8, d: u8| (s as u32 + (d as u32 * keep + 127) / 255).min(255) as u8;
-        *dst = image::Rgba([mix(src.r(), dst[0]), mix(src.g(), dst[1]), mix(src.b(), dst[2]), 255]);
-    }
-    under
+/// The frame in the encoder's format (blue, green, red, 255): Plexi's layer over the
+/// captured monitor when drawing on screen, or over black (the notebook paints its own
+/// background anyway). `under` is the monitor in that same format, the layer's size.
+/// Split across the CPU's cores: at 4K this is a lot of pixels.
+fn compose_bgra(layer: &egui::ColorImage, under: Option<&[u8]>, out: &mut Vec<u8>) {
+    let [w, h] = layer.size;
+    out.clear();
+    out.resize(w * h * 4, 0);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let rows = h.div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        for (i, chunk) in out.chunks_mut(rows * w * 4).enumerate() {
+            let first = i * rows * w;
+            scope.spawn(move || {
+                for (k, px) in chunk.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let src = layer.pixels[first + k];
+                    let d = match under {
+                        Some(u) => {
+                            let at = (first + k) * 4;
+                            [u[at], u[at + 1], u[at + 2]]
+                        }
+                        None => [0, 0, 0],
+                    };
+                    // `src` is premultiplied: src + dst * (1 - alpha).
+                    let keep = 255 - src.a() as u32;
+                    let mix = |s: u8, d: u8| (s as u32 + (d as u32 * keep + 127) / 255).min(255) as u8;
+                    *px = [mix(src.b(), d[0]), mix(src.g(), d[1]), mix(src.r(), d[2]), 255];
+                }
+            });
+        }
+    });
 }
 
 /// The video size for frames of `size`: scaled down to [`MAX_SIZE`] if bigger, and
@@ -195,29 +251,100 @@ impl Trail {
         self.points.clear();
     }
 
-    /// The streak, thinning and fading toward its tail, with a dot on the pointer.
+    /// The streak, tapering and fading toward its tail, with a dot on the pointer. The
+    /// pointer is only sampled once a frame, so the path is a smooth curve through the
+    /// samples, and it's painted as one ribbon (soft-edged, no marks where the samples
+    /// were, no darker overlaps).
     pub fn paint(&self, painter: &egui::Painter, now: f64, color: egui::Color32, size: f32, length: f32) {
         let Some(&(_, head)) = self.points.back() else { return };
         let fade = |t: f64| (1.0 - ((now - t) / length.max(0.01) as f64) as f32).clamp(0.0, 1.0);
-        let pts: Vec<_> = self.points.iter().collect();
-        for w in pts.windows(2) {
-            let (f0, f1) = (fade(w[0].0), fade(w[1].0));
-            let f = (f0 + f1) / 2.0;
-            if f <= 0.0 {
-                continue;
+        let path = smooth_path(&self.points.iter().copied().collect::<Vec<_>>());
+        if path.len() >= 2 {
+            let feather = 1.0 / painter.pixels_per_point();
+            let mut mesh = egui::epaint::Mesh::default();
+            for (k, &(t, p)) in path.iter().enumerate() {
+                let f = fade(t);
+                // Narrower than the dot, down to nothing at the tail.
+                let w = size * 0.36 * f.powf(0.7);
+                let c = color.gamma_multiply(f.powf(1.3) * 0.85);
+                let prev = path[k.saturating_sub(1)].1;
+                let next = path[(k + 1).min(path.len() - 1)].1;
+                let n = (next - prev).normalized().rot90();
+                let n = if n.is_finite() { n } else { egui::Vec2::ZERO };
+                // Across the ribbon: soft edge, edge, edge, soft edge.
+                for (off, col) in [
+                    (-(w + feather), egui::Color32::TRANSPARENT),
+                    (-w, c),
+                    (w, c),
+                    (w + feather, egui::Color32::TRANSPARENT),
+                ] {
+                    mesh.colored_vertex(p + n * off, col);
+                }
+                if k > 0 {
+                    let (a, b) = ((k as u32 - 1) * 4, k as u32 * 4);
+                    for j in 0..3 {
+                        mesh.add_triangle(a + j, a + j + 1, b + j);
+                        mesh.add_triangle(a + j + 1, b + j + 1, b + j);
+                    }
+                }
             }
-            let c = color.gamma_multiply(f * 0.8);
-            painter.line_segment([w[0].1, w[1].1], egui::Stroke::new(size * (0.25 + 0.6 * f), c));
-            painter.circle_filled(w[1].1, size * (0.125 + 0.3 * f1), c);
+            painter.add(egui::Shape::mesh(mesh));
         }
         painter.circle_filled(head, size / 2.0, color);
         painter.circle_stroke(head, size / 2.0, egui::Stroke::new(1.5, egui::Color32::from_white_alpha(200)));
     }
 }
 
+/// A Catmull-Rom curve through `pts` (time, position), in steps of about 2 points,
+/// with times interpolated along it.
+fn smooth_path(pts: &[(f64, egui::Pos2)]) -> Vec<(f64, egui::Pos2)> {
+    let n = pts.len();
+    if n < 3 {
+        return pts.to_vec();
+    }
+    let mut out = Vec::new();
+    for i in 0..n - 1 {
+        let p0 = pts[i.saturating_sub(1)].1;
+        let (p1, p2) = (pts[i].1, pts[i + 1].1);
+        let p3 = pts[(i + 2).min(n - 1)].1;
+        let steps = ((p1.distance(p2) / 2.0).ceil() as usize).clamp(1, 40);
+        for s in 0..steps {
+            let t = s as f32 / steps as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            let at = |a: f32, b: f32, c: f32, d: f32| {
+                0.5 * (2.0 * b
+                    + (c - a) * t
+                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+                    + (3.0 * b - a - 3.0 * c + d) * t3)
+            };
+            let p = egui::pos2(at(p0.x, p1.x, p2.x, p3.x), at(p0.y, p1.y, p2.y, p3.y));
+            out.push((pts[i].0 + (pts[i + 1].0 - pts[i].0) * t as f64, p));
+        }
+    }
+    out.push(pts[n - 1]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_trail_curves_through_its_samples() {
+        // Three samples making a right angle: the path passes through each of them, in
+        // small steps, and rounds the corner instead of meeting it.
+        let pts = [(0.0, egui::pos2(0.0, 0.0)), (0.1, egui::pos2(100.0, 0.0)), (0.2, egui::pos2(100.0, 100.0))];
+        let path = smooth_path(&pts);
+        assert!(path.len() > 50);
+        for (_, p) in &pts {
+            assert!(path.iter().any(|(_, q)| q.distance(*p) < 0.01), "passes through {p:?}");
+        }
+        assert!(path.windows(2).all(|w| w[0].1.distance(w[1].1) < 4.0), "small steps");
+        assert!(path.windows(2).all(|w| w[1].0 >= w[0].0), "times run forward");
+        // Just before the corner it's already turning: off the straight line y = 0.
+        let near = path.iter().find(|(_, q)| q.x > 90.0 && q.x < 99.0).unwrap().1;
+        assert!(near.y.abs() > 0.1 || near.x > 95.0, "{near:?}");
+    }
 
     #[test]
     fn the_trail_keeps_only_its_recent_path() {
@@ -294,6 +421,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// How long each step of a frame takes, on synthetic frames (no screen capture).
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "timing only"]
+    fn time_the_frame_steps() {
+        for [w, h] in [[1920u32, 1080u32], [2560, 1440], [3840, 2160]] {
+            let layer = egui::ColorImage::filled([w as usize, h as usize], egui::Color32::from_white_alpha(30));
+            let screen = vec![90u8; (w * h * 4) as usize];
+            let n = 20;
+            let mut bgra = Vec::new();
+            let t = Instant::now();
+            for _ in 0..n {
+                compose_bgra(&layer, Some(&screen), &mut bgra);
+            }
+            let compose_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+            let path = std::env::temp_dir().join(format!("plexi-bench-{w}.mp4"));
+            let mut v = VideoWriter::create(&path, w, h, FPS).unwrap();
+            let t = Instant::now();
+            for i in 0..n {
+                // A changing picture, so the encoder has real work.
+                for (k, px) in bgra.iter_mut().enumerate().step_by(97) {
+                    *px = (k + i * 13) as u8;
+                }
+                v.write(&bgra, i as f64 / 30.0, 1.0 / 30.0).unwrap();
+            }
+            let enc_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+            v.finish().unwrap();
+            let _ = std::fs::remove_file(&path);
+            eprintln!("{w}x{h}: compose+convert {compose_ms:.1} ms, encode {enc_ms:.1} ms");
+        }
+    }
+
     #[test]
     fn video_sizes_are_even_and_capped() {
         assert_eq!(video_size([1001, 701]), [1000, 700]);
@@ -306,10 +465,14 @@ mod tests {
         // Half-transparent white over black is mid gray; fully transparent shows black.
         let layer =
             egui::ColorImage::new([2, 1], vec![egui::Color32::from_white_alpha(128), egui::Color32::TRANSPARENT]);
-        let frame = Frame { time: 0.0, layer: Arc::new(layer), under: None };
-        let pic = compose(&frame);
-        assert!((pic.get_pixel(0, 0)[0] as i32 - 128).abs() <= 1);
-        assert_eq!(pic.get_pixel(1, 0).0, [0, 0, 0, 255]);
+        let mut out = Vec::new();
+        compose_bgra(&layer, None, &mut out);
+        assert!((out[0] as i32 - 128).abs() <= 1);
+        assert_eq!(out[4..8], [0, 0, 0, 255]);
+        // Over a captured screen (blue-green-red bytes): the transparent pixel shows it.
+        compose_bgra(&layer, Some(&[10, 20, 30, 255, 10, 20, 30, 255]), &mut out);
+        assert_eq!(out[4..8], [10, 20, 30, 255]);
+        assert!(out[0] > 128, "half white over the screen is lighter than either alone");
 
         // A smaller picture is centered as it is; a bigger one is scaled down to fit.
         let red = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
