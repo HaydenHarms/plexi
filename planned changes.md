@@ -14,4 +14,5 @@
 - [x] When there are no page numbers or borders, i do not want the shadow around the original page, i want it to be seamless
 - [ ] Add a recording mode
 - [ ] Strokes on my handwriting don't show up until you lift off the page, make it write as you write.
-- [ ] In my handwriting, the strokes are all straight-lined, no curves. I want curves 
+- [ ] In my handwriting, the strokes are all straight-lined, no curves. I want curves
+- [ ] Holding shift still doesn't let me select multiple things
