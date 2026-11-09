@@ -5,3 +5,5 @@
 - [x] Rectangle select tool (alongside the freeform lasso) to select an area, copy it and paste it elsewhere
 - [x] Hand tool: a neutral pointer for panning and grabbing, without having to pick the pen or the lasso
 - [x] Handwriting font: a tab where you write samples with the pen, saved as your own font to type in
+- [ ] Make the text boxes' resize drag points sit in the middle of the dotted line, not the inside.
+- [ ] None of the cursors i tried let me resize the text boxes. Allow text and hand tool at least to grab them
