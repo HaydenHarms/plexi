@@ -18,3 +18,4 @@
 - [ ] Holding shift still doesn't let me select multiple things
 - [ ] We don't need a print and export button, just export
 - [ ] Allow selection printing instead of page selection so that you can print a section not bounded by a page
+- [ ] Keep gif moving on "draw on screen" mode. Keep the same functions for both from now on.
