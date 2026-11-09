@@ -8,3 +8,4 @@
 - [ ] Make the text boxes' resize drag points sit in the middle of the dotted line, not the inside.
 - [ ] None of the cursors i tried let me resize the text boxes. Allow text and hand tool at least to grab them
 - [ ] Let's next all the select tools, and scrap the current rectangle screenshot function. Keep it as just a selector but let's make a "snapshot" tool under that next that just screenshots what we select on the canvas.
+- [ ] Allow ctrl z in my handwriting font
