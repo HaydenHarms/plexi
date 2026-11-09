@@ -13,3 +13,4 @@
 - [x] The hand cursor should look like a hand, i just get the transform axis and clicking off an object doesnt deselect it.
 - [x] When there are no page numbers or borders, i do not want the shadow around the original page, i want it to be seamless
 - [ ] Add a recording mode
+- [ ] Strokes on my handwriting don't show up until you lift off the page, make it write as you write.
