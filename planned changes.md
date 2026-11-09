@@ -12,7 +12,7 @@
 - [x] Make the hand tool look better
 - [x] The hand cursor should look like a hand, i just get the transform axis and clicking off an object doesnt deselect it.
 - [x] When there are no page numbers or borders, i do not want the shadow around the original page, i want it to be seamless
-- [ ] Add a recording mode
+- [ ] Add a recording mode that crosses both canvas and on screen drawing
 - [ ] Strokes on my handwriting don't show up until you lift off the page, make it write as you write.
 - [ ] In my handwriting, the strokes are all straight-lined, no curves. I want curves
 - [ ] Holding shift still doesn't let me select multiple things
