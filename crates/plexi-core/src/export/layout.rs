@@ -45,11 +45,22 @@ pub struct Layout {
     pub margin: f32,
     /// The part of the page [`Area::Region`] covers.
     pub region: Option<Rect>,
+    /// Where the area sits on a sheet with room to spare, as fractions of that spare
+    /// room across and down: `[0, 0]` is the top-left margin, `[1, 1]` the bottom-right.
+    /// `None` is centered across, at the top. Set by dragging it in the export preview.
+    pub place: Option<[f32; 2]>,
 }
 
 impl Default for Layout {
     fn default() -> Self {
-        Self { area: Area::Page, sheet: None, tile: false, margin: 0.0, region: None }
+        Self { area: Area::Page, sheet: None, tile: false, margin: 0.0, region: None, place: None }
+    }
+}
+
+impl Layout {
+    /// [`Self::place`], or where an area sits by default.
+    pub fn placement(&self) -> [f32; 2] {
+        self.place.map_or([0.5, 0.0], |[x, y]| [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)])
     }
 }
 
@@ -138,13 +149,16 @@ fn sheet_frames(page: &Page, layout: &Layout) -> Vec<Frame> {
         }
         return tiles.into_iter().map(Frame::exact).collect();
     }
-    // Shrink to fit one sheet (never enlarge), centered across and starting at the top.
+    // Shrink to fit one sheet (never enlarge), placed in the room left over: centered
+    // across and starting at the top unless it was dragged somewhere else.
     let (iw, ih) = ((w - 2.0 * m).max(1.0), (h - 2.0 * m).max(1.0));
     let s = (iw / area.width().max(1.0)).min(ih / area.height().max(1.0)).min(1.0);
     let (vw, vh) = (w / s, h / s);
-    let c = area.center();
-    let top = if area.height() * s < ih { area.min[1] - m / s } else { c[1] - vh / 2.0 };
-    vec![Frame { view: Rect::from_min_size([c[0] - vw / 2.0, top], [vw, vh]), size: [w, h], clip: None }]
+    let [fx, fy] = layout.placement();
+    let spare = [(iw - area.width() * s).max(0.0), (ih - area.height() * s).max(0.0)];
+    let left = area.min[0] - (m + fx * spare[0]) / s;
+    let top = area.min[1] - (m + fy * spare[1]) / s;
+    vec![Frame { view: Rect::from_min_size([left, top], [vw, vh]), size: [w, h], clip: None }]
 }
 
 /// Parse a page list like `1, 3, 5-7` (1-based, as people count pages) into sorted
@@ -188,6 +202,8 @@ mod tests {
             b: [x + 10.0, y + 10.0],
             color: Color::BLACK,
             width: 0.0,
+            group: 0,
+            rotation: 0.0,
         })
     }
 
@@ -246,6 +262,28 @@ mod tests {
         page.elements.push(dot(0.0, 0.0));
         let layout = Layout { area: Area::Content, sheet: Some([816.0, 1056.0]), ..Default::default() };
         assert_eq!(frames(&page, &layout)[0].scale(), 1.0);
+    }
+
+    #[test]
+    fn an_area_can_be_placed_anywhere_on_its_sheet() {
+        let mut page = Page::new("p", crate::model::PageSize::Infinite);
+        page.elements.push(dot(100.0, 100.0));
+        let region = Rect::from_min_size([0.0, 0.0], [200.0, 100.0]);
+        let mut layout =
+            Layout { area: Area::Region, sheet: Some([800.0, 1000.0]), region: Some(region), ..Default::default() };
+        // Where the area's top-left lands on the sheet, in sheet units.
+        let at = |layout: &Layout| {
+            let f = frames(&page, layout)[0];
+            [(region.min[0] - f.view.min[0]) * f.scale(), (region.min[1] - f.view.min[1]) * f.scale()]
+        };
+        assert_eq!(at(&layout), [300.0, 0.0], "centered across, at the top");
+        layout.place = Some([0.0, 1.0]);
+        assert_eq!(at(&layout), [0.0, 900.0], "bottom-left");
+        layout.place = Some([1.0, 0.5]);
+        assert_eq!(at(&layout), [600.0, 450.0]);
+        layout.margin = 50.0;
+        layout.place = Some([0.0, 0.0]);
+        assert_eq!(at(&layout), [50.0, 50.0], "never into the margin");
     }
 
     #[test]

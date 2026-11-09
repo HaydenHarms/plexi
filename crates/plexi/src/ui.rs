@@ -96,6 +96,7 @@ pub enum Icon {
     Notebook,
     Snip,
     Record,
+    Rotate,
 }
 
 fn tool_icon(t: Tool) -> Icon {
@@ -248,6 +249,11 @@ pub fn paint_icon(p: &Painter, r: Rect, icon: Icon, c: Color32) {
             // A ring with a dot: the usual "record" mark.
             p.circle_stroke(at(8.0, 8.0), 6.0 * s, st);
             p.circle_filled(at(8.0, 8.0), 3.0 * s, st.color);
+        }
+        Icon::Rotate => {
+            // Most of a circle with an arrowhead at its end.
+            p.add(EShape::line(arc(8.0, 8.0, 5.5, -1.2, 4.0), st));
+            line(&[(10.0, 1.2), (10.4, 3.4), (12.6, 2.9)]);
         }
     }
 }
@@ -1545,6 +1551,7 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                     p.rect_filled(area, 8.0, th_canvas);
                     let pv = &dlg.preview;
                     let frame = pv.frames.get(pv.index).map(|f| f.1);
+                    let mut sheet_rect = None;
                     if let (Some(tex), Some(frame)) = (&pv.texture, frame) {
                         let inner = area.shrink(14.0);
                         let aspect = frame.size[0] / frame.size[1].max(1.0);
@@ -1560,10 +1567,54 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                         if pv.pending.is_some() {
                             p.rect_filled(r, 0.0, Color32::from_white_alpha(60));
                         }
+                        sheet_rect = Some(r);
                     } else if let Some(e) = &pv.error {
                         p.text(area.center(), Align2::CENTER_CENTER, e, egui::FontId::proportional(13.0), Color32::RED);
                     } else {
                         ui.put(Rect::from_center_size(area.center(), vec2(24.0, 24.0)), egui::Spinner::new());
+                    }
+                    // A picked area on a bigger sheet can be dragged to where it should
+                    // print on it.
+                    let mut movable = false;
+                    if let (Some(r), Some(frame)) = (sheet_rect, frame)
+                        && let (Some(clip), Some(sheet)) = (frame.clip, dlg.sheet())
+                    {
+                        let k = r.width() / sheet[0].max(1.0); // preview points per sheet unit
+                        let s = frame.scale();
+                        let m = dlg.margin_in * 96.0;
+                        let size = [clip.width() * s, clip.height() * s];
+                        let spare = [(sheet[0] - 2.0 * m - size[0]).max(0.0), (sheet[1] - 2.0 * m - size[1]).max(0.0)];
+                        let f = dlg.layout().placement();
+                        let at = |f: [f32; 2]| {
+                            Rect::from_min_size(
+                                r.min + vec2(m + f[0] * spare[0], m + f[1] * spare[1]) * k,
+                                vec2(size[0], size[1]) * k,
+                            )
+                        };
+                        let resp = ui.interact(at(f), Id::unique("export-place"), Sense::drag());
+                        if spare[0] + spare[1] > 0.5 && (resp.hovered() || resp.dragged()) {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                            let shown = at(f);
+                            let ring = [
+                                shown.left_top(),
+                                shown.right_top(),
+                                shown.right_bottom(),
+                                shown.left_bottom(),
+                                shown.left_top(),
+                            ];
+                            p.extend(egui::Shape::dashed_line(&ring, Stroke::new(1.5, ACCENT), 5.0, 3.0));
+                        }
+                        if resp.dragged() {
+                            let d = resp.drag_delta() / k;
+                            let step = |f: f32, d: f32, spare: f32| {
+                                if spare > 0.5 { (f + d / spare).clamp(0.0, 1.0) } else { f }
+                            };
+                            dlg.place = Some([step(f[0], d.x, spare[0]), step(f[1], d.y, spare[1])]);
+                        }
+                        if spare[0] + spare[1] > 0.5 {
+                            movable = true;
+                            resp.on_hover_text("Drag to move it on the sheet");
+                        }
                     }
                     let n = dlg.preview.frames.len();
                     ui.horizontal(|ui| {
@@ -1586,6 +1637,9 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                                 format!("{} × {} in", fmt_in(f.size[0]), fmt_in(f.size[1]))
                             };
                             ui.weak(dims);
+                        }
+                        if movable {
+                            ui.weak("· drag the area to place it");
                         }
                     });
                 });
@@ -1832,6 +1886,10 @@ fn context_menu(app: &mut PlexiApp, ctx: &Context) {
                             app.remove_crop(t, img.id);
                             close = true;
                         }
+                        if item(ui, "Remove background") {
+                            app.remove_image_background(t, img.id);
+                            close = true;
+                        }
                         if item(ui, "Reset to original size") {
                             app.reset_image_size(t, img.id, ctx.pixels_per_point());
                             close = true;
@@ -1850,6 +1908,14 @@ fn context_menu(app: &mut PlexiApp, ctx: &Context) {
                     }
                     if item(ui, "Duplicate") {
                         app.duplicate_selection();
+                        close = true;
+                    }
+                    if app.can_group() && item(ui, "Group") {
+                        app.group_selection();
+                        close = true;
+                    }
+                    if app.can_ungroup() && item(ui, "Ungroup") {
+                        app.ungroup_selection();
                         close = true;
                     }
                     if item(ui, "Delete") {
@@ -2023,11 +2089,15 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
                 ("Colors", "1 – 9".into()),
                 ("Thinner / thicker", "[ · ]".into()),
                 ("Erase with any tool", "Middle-drag (or pen barrel button)".into()),
-                ("Menu: lock image, arrange, paper, delete page", "Right-click (no drag)".into()),
-                ("Resize an image", "Select it, drag a corner (Shift: keep proportions)".into()),
+                ("Menu: lock image, group, arrange, paper, delete page", "Right-click (no drag)".into()),
+                ("Resize an image or shape", "Select it, drag a corner (Shift: keep proportions)".into()),
+                ("Turn what's selected", "Drag the round handle above it (Shift: 15° steps)".into()),
                 ("Set a text box's wrap width", "Drag the handle on its left or right side".into()),
-                ("Crop an image", "Right-click it → Crop image".into()),
-                ("Edit a text box", "Double-click it (Select tool)".into()),
+                ("Resize a text box", "Drag a corner (Shift: keep proportions)".into()),
+                ("Crop an image · take out its background", "Right-click it → Crop image · Remove background".into()),
+                ("Edit a text box", "Double-click it (Select tool) · F2".into()),
+                ("Bold · Italic · Underline", "Ctrl+B · Ctrl+I · Ctrl+U".into()),
+                ("Group · Ungroup", "Ctrl+G · Ctrl+Shift+G".into()),
                 ("Pan", "Right-drag · Space+drag · Shift+scroll · two fingers".into()),
                 ("Zoom", "Scroll wheel · pinch · Ctrl+= / Ctrl+-".into()),
                 ("Fit page", "Ctrl+0".into()),
@@ -2068,7 +2138,9 @@ fn toast(app: &mut PlexiApp, ctx: &Context) {
         .show(ctx, |ui| {
             pill(ui).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
                 let c = if error { Color32::from_rgb(0xd6, 0x3a, 0x3a) } else { theme(ui).ink };
-                ui.label(egui::RichText::new(text).color(c));
+                // An anchored area sizes itself from last frame, so a wrapping label
+                // would stack its words one per line; keep it on one line instead.
+                ui.add(egui::Label::new(egui::RichText::new(text).color(c)).wrap_mode(egui::TextWrapMode::Extend));
             });
         });
 }

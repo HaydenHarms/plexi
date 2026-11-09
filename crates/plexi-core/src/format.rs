@@ -91,6 +91,7 @@ pub fn read_from<R: Read + Seek>(r: R) -> Result<Document, FormatError> {
         doc.assets.insert(key, Arc::new(bytes));
     }
     doc.version = FORMAT_VERSION;
+    doc.renew_groups();
     Ok(doc)
 }
 
@@ -140,6 +141,7 @@ mod tests {
             color: Color::rgb(10, 20, 30),
             width: 3.0,
             points: vec![InkPoint::new(10.0, 10.0, 0.4), InkPoint::new(50.0, 60.0, 0.9)],
+            group: 0,
         }));
         p.elements.push(Element::Text(TextBox::new([100.0, 100.0], "hello\nworld", 20.0, Color::BLACK)));
         p.elements.push(Element::Image(ImageEl {
@@ -149,6 +151,8 @@ mod tests {
             size: [10.0, 10.0],
             locked: true,
             crop: None,
+            group: 0,
+            rotation: 0.0,
         }));
         d.overlay.elements.push(Element::Shape(Shape {
             id: new_id(),
@@ -157,6 +161,8 @@ mod tests {
             b: [100.0, 50.0],
             color: Color::rgb(255, 0, 0),
             width: 4.0,
+            group: 0,
+            rotation: 0.0,
         }));
         d
     }

@@ -5,7 +5,6 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use resvg::usvg::fontdb;
 
-use crate::handwriting::FAMILY_NAME as HANDWRITING_FAMILY;
 use crate::model::DEFAULT_FONT;
 
 /// System fonts plus the bundled default font. Loading the system fonts takes a moment,
@@ -27,25 +26,35 @@ pub fn database() -> Arc<fontdb::Database> {
     .clone()
 }
 
-/// The user's own handwriting font ([`HANDWRITING_FAMILY`]), once saved in the
-/// handwriting window. Kept separately from [`database`] so saving a new one takes
-/// effect immediately, for everything that reads faces through this module: the editor
-/// (via `FontBook`, once it drops its own cache), every exporter, and the font picker.
-static HANDWRITING: RwLock<Option<Arc<Vec<u8>>>> = RwLock::new(None);
+/// The user's own handwriting fonts, by family name, once saved in the handwriting
+/// window. Kept separately from [`database`] so saving a new one takes effect
+/// immediately, for everything that reads faces through this module: the editor (via
+/// `FontBook`, once it drops its own cache), every exporter, and the font picker.
+static HANDWRITING: RwLock<Vec<(String, Arc<Vec<u8>>)>> = RwLock::new(Vec::new());
 
-/// Install (or, with `None`, clear) the handwriting face. Called once at startup if a
-/// font was saved before, and again every time the handwriting window saves a new one.
-pub fn set_handwriting(data: Option<Vec<u8>>) {
-    *HANDWRITING.write().unwrap() = data.map(Arc::new);
+/// Install (or, with `None`, remove) the handwriting font called `family`. Called at
+/// startup for every font saved before, and again each time the handwriting window
+/// saves, renames or deletes one.
+pub fn set_handwriting(family: &str, data: Option<Vec<u8>>) {
+    let mut fonts = HANDWRITING.write().unwrap();
+    fonts.retain(|(n, _)| n != family);
+    if let Some(d) = data {
+        fonts.push((family.to_owned(), Arc::new(d)));
+    }
 }
 
-/// Whether a handwriting font has been saved and installed.
-pub fn has_handwriting() -> bool {
-    HANDWRITING.read().unwrap().is_some()
+/// The handwriting fonts installed, in the order they were made.
+pub fn handwriting_families() -> Vec<String> {
+    HANDWRITING.read().unwrap().iter().map(|(n, _)| n.clone()).collect()
 }
 
-fn handwriting_face() -> Option<Face> {
-    let data = HANDWRITING.read().unwrap().clone()?;
+/// Whether `family` is one of the user's handwriting fonts.
+pub fn is_handwriting(family: &str) -> bool {
+    HANDWRITING.read().unwrap().iter().any(|(n, _)| n == family)
+}
+
+fn handwriting_face(family: &str) -> Option<Face> {
+    let data = HANDWRITING.read().unwrap().iter().find(|(n, _)| n == family)?.1.clone();
     Some(Face { data, index: 0, bold: false, italic: false })
 }
 
@@ -68,8 +77,8 @@ const FAVORITES: &[&str] = &[
     "Ink Free",
 ];
 
-/// Font families to offer: the user's own handwriting (if saved) first, then favorites
-/// that are installed, then every other family.
+/// Font families to offer: the user's own handwriting fonts first, then favorites that
+/// are installed, then every other family.
 pub fn families() -> (Vec<String>, Vec<String>) {
     let db = database();
     let mut all: Vec<String> = db.faces().filter_map(|f| f.families.first().map(|(name, _)| name.clone())).collect();
@@ -78,9 +87,9 @@ pub fn families() -> (Vec<String>, Vec<String>) {
     all.retain(|n| n != DEFAULT_FONT && !n.starts_with('.'));
     let mut favorites: Vec<String> =
         FAVORITES.iter().filter(|f| all.iter().any(|n| n == *f)).map(|f| f.to_string()).collect();
-    if has_handwriting() {
-        favorites.insert(0, HANDWRITING_FAMILY.to_string());
-    }
+    let hand = handwriting_families();
+    favorites.retain(|f| !hand.contains(f));
+    favorites.splice(0..0, hand);
     let rest = all.into_iter().filter(|n| !favorites.contains(n)).collect();
     (favorites, rest)
 }
@@ -118,8 +127,8 @@ fn query(family: &str, bold: bool, italic: bool) -> Option<fontdb::ID> {
 
 /// The face `family` uses for the given style, if the family is installed.
 pub fn face(family: &str, bold: bool, italic: bool) -> Option<Face> {
-    if family == HANDWRITING_FAMILY {
-        return handwriting_face();
+    if let Some(f) = handwriting_face(family) {
+        return Some(f);
     }
     let db = database();
     let id = query(family, bold, italic)?;
@@ -131,7 +140,7 @@ pub fn face(family: &str, bold: bool, italic: bool) -> Option<Face> {
 /// Whether `family` has real bold and italic faces. The handwriting font, like the
 /// bundled default font, only ever has one.
 pub fn styles(family: &str) -> (bool, bool) {
-    if family == HANDWRITING_FAMILY {
+    if is_handwriting(family) {
         return (false, false);
     }
     let db = database();
@@ -159,27 +168,32 @@ mod tests {
     /// The only test in this file that touches the handwriting slot; it cleans up after
     /// itself so it can't affect any other test's view of `families()`/`face()`.
     #[test]
-    fn handwriting_family_is_offered_once_installed() {
+    fn handwriting_families_are_offered_once_installed() {
         use crate::handwriting::{self, Samples};
         use crate::ink::StrokeBuilder;
 
-        assert!(!has_handwriting());
-        assert!(face(HANDWRITING_FAMILY, false, false).is_none());
+        // Names no other test installs, so this can't affect any other test.
+        let (neat, messy) = ("Test Neat Hand", "Test Messy Hand");
+        assert!(!is_handwriting(neat));
+        assert!(face(neat, false, false).is_none());
 
         let mut samples = Samples::default();
         let mut b = StrokeBuilder::new(Samples::new_stroke(), 0.0, 0.001);
         b.push(0.0, [0.3, 0.5], 0.5);
         b.push(1.0 / 60.0, [0.6, 0.5], 0.5);
         samples.push_stroke('A', b.finish());
-        set_handwriting(Some(handwriting::build_font(&samples)));
+        set_handwriting(neat, Some(handwriting::build_font(&samples, neat)));
+        set_handwriting(messy, Some(handwriting::build_font(&samples, messy)));
 
-        assert!(has_handwriting());
-        let f = face(HANDWRITING_FAMILY, true, true).expect("installed handwriting face");
+        assert!(is_handwriting(neat) && is_handwriting(messy));
+        let f = face(neat, true, true).expect("installed handwriting face");
         assert!(!f.bold && !f.italic);
-        assert_eq!(styles(HANDWRITING_FAMILY), (false, false));
-        assert_eq!(families().0.first().map(String::as_str), Some(HANDWRITING_FAMILY));
+        assert_eq!(styles(messy), (false, false));
+        let offered = families().0;
+        assert!(offered.iter().any(|n| n == neat) && offered.iter().any(|n| n == messy), "{offered:?}");
 
-        set_handwriting(None);
-        assert!(face(HANDWRITING_FAMILY, false, false).is_none());
+        set_handwriting(neat, None);
+        set_handwriting(messy, None);
+        assert!(face(neat, false, false).is_none());
     }
 }

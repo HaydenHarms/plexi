@@ -3,6 +3,7 @@
 //! Nothing here depends on the UI, so it can be tested headless and reused by the
 //! command-line exporter.
 
+pub mod cutout;
 pub mod export;
 pub mod fonts;
 pub mod format;

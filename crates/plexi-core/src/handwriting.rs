@@ -36,7 +36,8 @@ use write_fonts::types::{Fixed, GlyphId, NameId, Tag, Version16Dot16};
 use crate::ink::{PenPiece, pen_pieces};
 use crate::model::{Color, InkKind, Stroke, new_id};
 
-/// Family name the generated font and font picker use.
+/// The name the first handwriting font gets (and the one samples saved before fonts had
+/// names are loaded as).
 pub const FAMILY_NAME: &str = "My Handwriting";
 
 /// Characters the handwriting window offers a box for. Anything not written falls back
@@ -84,7 +85,7 @@ impl Samples {
     /// Start a fresh stroke for `c`, with [`PEN_WIDTH`] and black ink (color and kind
     /// don't matter for the font; they're only there because it's a [`Stroke`]).
     pub fn new_stroke() -> Stroke {
-        Stroke { id: new_id(), kind: InkKind::Pen, color: Color::BLACK, width: PEN_WIDTH, points: Vec::new() }
+        Stroke { id: new_id(), kind: InkKind::Pen, color: Color::BLACK, width: PEN_WIDTH, points: Vec::new(), group: 0 }
     }
 
     pub fn push_stroke(&mut self, c: char, stroke: Stroke) {
@@ -109,15 +110,40 @@ impl Samples {
     }
 }
 
-/// Load saved samples, or empty ones if there's no file yet (a fresh install, or one
-/// that was deleted by hand).
-pub fn load(path: &Path) -> Samples {
-    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+/// One named handwriting font: its family name and the samples it's built from.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct HandwritingFont {
+    pub name: String,
+    pub samples: Samples,
 }
 
-/// Save samples as pretty-printed JSON, so they're still readable (and editable) later.
-pub fn save(samples: &Samples, path: &Path) -> std::io::Result<()> {
-    let json = serde_json::to_vec_pretty(samples).unwrap_or_default();
+/// Every handwriting font, as saved on disk.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Library {
+    // No `default` here: a file of bare samples (from before fonts had names) must fail
+    // to parse as a library, so `load` can read it the old way instead.
+    pub fonts: Vec<HandwritingFont>,
+}
+
+/// Load the saved fonts, or none if there's no file yet (a fresh install, or one that
+/// was deleted by hand). A file from before fonts had names becomes one font called
+/// [`FAMILY_NAME`].
+pub fn load(path: &Path) -> Library {
+    let Ok(bytes) = std::fs::read(path) else { return Library::default() };
+    if let Ok(lib) = serde_json::from_slice::<Library>(&bytes) {
+        return lib;
+    }
+    match serde_json::from_slice::<Samples>(&bytes) {
+        Ok(samples) if !samples.is_empty() => {
+            Library { fonts: vec![HandwritingFont { name: FAMILY_NAME.into(), samples }] }
+        }
+        _ => Library::default(),
+    }
+}
+
+/// Save the fonts as pretty-printed JSON, so they're still readable (and editable) later.
+pub fn save(lib: &Library, path: &Path) -> std::io::Result<()> {
+    let json = serde_json::to_vec_pretty(lib).unwrap_or_default();
     std::fs::write(path, json)
 }
 
@@ -212,7 +238,7 @@ fn glyph_outline(strokes: &[Stroke]) -> Option<(BezPath, f32, f32)> {
 /// Characters that weren't written (an empty or missing entry) get no glyph and no
 /// `cmap` mapping at all, so a renderer falls back to its next font for them, exactly
 /// like a face that's simply missing a glyph.
-pub fn build_font(samples: &Samples) -> Vec<u8> {
+pub fn build_font(samples: &Samples, family: &str) -> Vec<u8> {
     let chars = samples.written_chars();
 
     let mut builder = GlyfLocaBuilder::new();
@@ -315,13 +341,16 @@ pub fn build_font(samples: &Samples) -> Vec<u8> {
         us_max_context: Some(0),
         ..Default::default()
     };
+    // PostScript names allow only printable ASCII without spaces and a few symbols.
+    let ps: String = family.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let ps = if ps.is_empty() { "Handwriting".to_owned() } else { ps };
     let name = Name::new(vec![
-        NameRecord::new(3, 1, 0x409, NameId::FAMILY_NAME, FAMILY_NAME.to_string().into()),
+        NameRecord::new(3, 1, 0x409, NameId::FAMILY_NAME, family.to_string().into()),
         NameRecord::new(3, 1, 0x409, NameId::SUBFAMILY_NAME, "Regular".to_string().into()),
-        NameRecord::new(3, 1, 0x409, NameId::UNIQUE_ID, "1.0;Plexi;MyHandwriting".to_string().into()),
-        NameRecord::new(3, 1, 0x409, NameId::FULL_NAME, FAMILY_NAME.to_string().into()),
+        NameRecord::new(3, 1, 0x409, NameId::UNIQUE_ID, format!("1.0;Plexi;{ps}").into()),
+        NameRecord::new(3, 1, 0x409, NameId::FULL_NAME, family.to_string().into()),
         NameRecord::new(3, 1, 0x409, NameId::VERSION_STRING, "Version 1.0".to_string().into()),
-        NameRecord::new(3, 1, 0x409, NameId::POSTSCRIPT_NAME, "MyHandwriting-Regular".to_string().into()),
+        NameRecord::new(3, 1, 0x409, NameId::POSTSCRIPT_NAME, format!("{ps}-Regular").into()),
     ]);
     let post = Post {
         version: Version16Dot16::VERSION_3_0,
@@ -378,7 +407,7 @@ mod tests {
 
     #[test]
     fn empty_samples_build_a_font_with_only_notdef_and_space() {
-        let bytes = build_font(&Samples::default());
+        let bytes = build_font(&Samples::default(), FAMILY_NAME);
         let face = ttf_parser::Face::parse(&bytes, 0).expect("a valid font, even with nothing drawn");
         assert_eq!(face.number_of_glyphs(), 2); // .notdef, space
         assert!(face.glyph_index(' ').is_some());
@@ -389,7 +418,7 @@ mod tests {
     fn a_written_character_gets_a_filled_outline() {
         let mut samples = Samples::default();
         scribble('A', &mut samples);
-        let bytes = build_font(&samples);
+        let bytes = build_font(&samples, FAMILY_NAME);
 
         let face = ttf_parser::Face::parse(&bytes, 0).expect("fontdb/ttf-parser can read the generated font");
         let gid = face.glyph_index('A').expect("the written character is mapped in cmap");
@@ -420,7 +449,7 @@ mod tests {
     fn fontdb_also_reads_the_family_name() {
         let mut samples = Samples::default();
         scribble('A', &mut samples);
-        let bytes = build_font(&samples);
+        let bytes = build_font(&samples, FAMILY_NAME);
 
         let mut db = resvg::usvg::fontdb::Database::new();
         db.load_font_data(bytes);
@@ -433,13 +462,46 @@ mod tests {
         let mut samples = Samples::default();
         scribble('B', &mut samples);
         let path = std::env::temp_dir().join(format!("plexi-handwriting-test-{}.json", new_id()));
-        save(&samples, &path).unwrap();
-        let loaded = load(&path);
+        let lib = Library { fonts: vec![HandwritingFont { name: "B".into(), samples: samples.clone() }] };
+        save(&lib, &path).unwrap();
+        let loaded = load(&path).fonts.remove(0).samples;
         let _ = std::fs::remove_file(&path);
         assert_eq!(loaded.written_chars(), vec!['B']);
         // Stroke ids aren't persisted (they're regenerated, like everywhere else in the
         // document), so compare the ink itself rather than the whole struct.
         assert_eq!(loaded.strokes('B')[0].points, samples.strokes('B')[0].points);
         assert_eq!(loaded.strokes('B')[0].width, samples.strokes('B')[0].width);
+    }
+
+    #[test]
+    fn fonts_have_names_and_old_samples_still_load() {
+        let dir = std::env::temp_dir().join(format!("plexi-hw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("handwriting.json");
+        let mut samples = Samples::default();
+        scribble('A', &mut samples);
+        // A file of bare samples, the way they were saved before fonts had names.
+        std::fs::write(&path, serde_json::to_vec(&samples).unwrap()).unwrap();
+        let lib = load(&path);
+        assert_eq!(lib.fonts.len(), 1);
+        assert_eq!(lib.fonts[0].name, FAMILY_NAME);
+        assert!(!lib.fonts[0].samples.is_empty());
+
+        let lib = Library {
+            fonts: vec![
+                HandwritingFont { name: "Neat".into(), samples: samples.clone() },
+                HandwritingFont { name: "Messy".into(), samples },
+            ],
+        };
+        save(&lib, &path).unwrap();
+        let back = load(&path);
+        let names: Vec<&str> = back.fonts.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Neat", "Messy"]);
+        assert_eq!(back.fonts[1].samples.written_chars(), vec!['A']);
+        let bytes = build_font(&lib.fonts[1].samples, "Messy");
+        let face = ttf_parser::Face::parse(&bytes, 0).unwrap();
+        let family = face.names().into_iter().find(|n| n.name_id == ttf_parser::name_id::FAMILY);
+        assert_eq!(family.and_then(|n| n.to_string()).as_deref(), Some("Messy"));
+        std::fs::remove_dir_all(dir).ok();
     }
 }

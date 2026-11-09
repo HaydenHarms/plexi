@@ -601,6 +601,8 @@ fn preview_tools() {
         b: [1100.0, 200.0],
         color: plexi_core::Color::BLACK,
         width: 3.0,
+        group: 0,
+        rotation: 0.0,
     };
     r.app.doc.pages[0].elements.push(plexi_core::Element::Shape(far));
     r.app.touch();
@@ -625,6 +627,84 @@ fn preview_tools() {
     r.snapshot("snip");
     // Cancel rather than let the snip capture the real screen.
     r.button(PointerButton::Secondary, true);
+    r.finish();
+}
+
+#[test]
+#[ignore = "renders stills of rotating, outlines, shape handles, groups, the toast and print placement"]
+fn preview_round_four() {
+    use crate::app::Tool;
+    let out = std::env::temp_dir().join("plexi-preview-four");
+    let mut r = Recorder::new(&out);
+    r.wait(0.2);
+    r.app.tool = Tool::Shape(plexi_core::ShapeKind::Rect);
+    r.drag(PointerButton::Primary, &[(220.0, 260.0), (330.0, 300.0), (420.0, 360.0)], 2);
+    r.app.tool = Tool::Pen;
+    r.drag(PointerButton::Primary, &curve(&[(560.0, 420.0), (690.0, 360.0), (820.0, 440.0)], 10), 2);
+    let ctx = r.ctx.clone();
+    let mut img = image::RgbaImage::from_pixel(120, 80, image::Rgba([255, 255, 255, 255]));
+    for y in 20..60 {
+        for x in 30..90 {
+            img.put_pixel(x, y, image::Rgba([230, 120, 30, 255]));
+        }
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    r.app.insert_image(bytes.into_inner(), Some([700.0, 150.0]), &ctx);
+    r.app.insert_text("Turn me".into(), &ctx);
+    r.app.select_all();
+    r.app.tool = Tool::Hand;
+    r.wait(0.3);
+    r.snapshot("outlines");
+    let t = r.app.target();
+    let (view, origin) = (r.app.view, r.app.canvas_origin);
+    let (handle, _) = r.app.rotate_handle(t, view, origin).unwrap();
+    let c = view.to_screen(origin, r.app.selection_bounds(t).unwrap().center());
+    r.move_to((handle.x, handle.y), 0.2);
+    r.snapshot("rotate-hover");
+    r.button(PointerButton::Primary, true);
+    let d = handle.distance(c);
+    r.move_to((c.x + d * 0.5, c.y - d * 0.87), 0.4);
+    r.snapshot("rotating");
+    r.button(PointerButton::Primary, false);
+    r.wait(0.3);
+    r.snapshot("rotated");
+    // Just the box: its corner handles.
+    let id = r.app.doc.pages[0].elements.iter().find(|e| matches!(e, plexi_core::Element::Shape(_))).unwrap().id();
+    r.app.selection = [id].into();
+    r.wait(0.2);
+    r.snapshot("shape-handles");
+    // A group of the text and the picture: one outline.
+    let ids: Vec<u64> = r.app.doc.pages[0]
+        .elements
+        .iter()
+        .filter(|e| matches!(e, plexi_core::Element::Text(_) | plexi_core::Element::Image(_)))
+        .map(|e| e.id())
+        .collect();
+    r.app.selection = ids.into_iter().collect();
+    r.app.group_selection();
+    r.app.toast("Saved Plexi recording 3.mp4 in Downloads");
+    r.wait(0.3);
+    r.snapshot("group-and-toast");
+    r.app.toast("Saved Untitled.plexi");
+    r.wait(0.3);
+    r.snapshot("toast-short");
+    r.app.selection.clear();
+    r.app.open_export_dialog();
+    r.app.set_export_area(t, plexi_core::Rect::from_min_size([100.0, 100.0], [300.0, 200.0]));
+    if let Some(d) = &mut r.app.export {
+        d.paper = crate::app::PaperChoice::Preset(0);
+        d.place = Some([0.15, 0.7]);
+    }
+    for _ in 0..30 {
+        r.wait(0.1);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    r.snapshot("placed");
+    r.app.export = None;
+    r.app.handwriting.open = true;
+    r.wait(0.4);
+    r.snapshot("handwriting");
     r.finish();
 }
 

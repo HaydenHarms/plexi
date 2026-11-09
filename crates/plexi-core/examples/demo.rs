@@ -12,7 +12,7 @@ fn wave(x0: f32, y0: f32, len: f32, amp: f32, turns: f32, color: Color, width: f
             InkPoint::new(x0 + t * len, y0 + (t * turns * std::f32::consts::TAU).sin() * amp, p)
         })
         .collect();
-    Element::Stroke(Stroke { id: new_id(), kind: InkKind::Pen, color, width, points })
+    Element::Stroke(Stroke { id: new_id(), kind: InkKind::Pen, color, width, points, group: 0 })
 }
 
 fn loops(x0: f32, y0: f32, count: usize, color: Color) -> Element {
@@ -24,7 +24,7 @@ fn loops(x0: f32, y0: f32, count: usize, color: Color) -> Element {
             InkPoint::new(x0 + t * 5.0 - 12.0 * t.sin(), y0 - 14.0 * t.cos(), 0.35 + 0.3 * (t * 0.5).sin().abs())
         })
         .collect();
-    Element::Stroke(Stroke { id: new_id(), kind: InkKind::Pen, color, width: 2.6, points })
+    Element::Stroke(Stroke { id: new_id(), kind: InkKind::Pen, color, width: 2.6, points, group: 0 })
 }
 
 fn main() {
@@ -43,6 +43,7 @@ fn main() {
         color: Color::rgba(0xff, 0xe0, 0x2e, 110),
         width: 22.0,
         points: vec![InkPoint::new(76.0, 166.0, 0.5), InkPoint::new(420.0, 166.0, 0.5)],
+        group: 0,
     }));
     for (i, y) in [160.0, 224.0, 288.0, 352.0].into_iter().enumerate() {
         page.elements.push(loops(84.0, y, 10 + i * 3, if i == 1 { blue } else { ink }));
@@ -60,6 +61,8 @@ fn main() {
         b: [800.0, 290.0],
         color: red,
         width: 2.5,
+        group: 0,
+        rotation: 0.0,
     }));
     page.elements.push(Element::Shape(Shape {
         id: new_id(),
@@ -68,6 +71,8 @@ fn main() {
         b: [520.0, 290.0],
         color: red,
         width: 3.0,
+        group: 0,
+        rotation: 0.0,
     }));
     page.elements.push(wave(80.0, 470.0, 640.0, 24.0, 3.0, ink, 4.0));
     page.elements.push(Element::Shape(Shape {
@@ -77,6 +82,8 @@ fn main() {
         b: [744.0, 700.0],
         color: blue,
         width: 2.0,
+        group: 0,
+        rotation: 0.0,
     }));
     page.elements.push(Element::Text(TextBox::new(
         [92.0, 560.0],
@@ -114,6 +121,8 @@ fn main() {
         b: [560.0, 330.0],
         color: red,
         width: 5.0,
+        group: 0,
+        rotation: 0.0,
     }));
     doc.overlay.elements.push(loops(240.0, 600.0, 12, red));
     doc.overlay.elements.push(Element::Stroke(Stroke {
@@ -122,6 +131,7 @@ fn main() {
         color: Color::rgba(0xff, 0xe0, 0x2e, 120),
         width: 26.0,
         points: vec![InkPoint::new(600.0, 300.0, 0.5), InkPoint::new(1000.0, 300.0, 0.5)],
+        group: 0,
     }));
 
     format::save(&doc, std::path::Path::new(&out)).expect("save demo");

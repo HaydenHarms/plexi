@@ -152,6 +152,19 @@ fn polyline_data(points: &[InkPoint]) -> String {
 }
 
 pub(crate) fn element_svg(out: &mut String, el: &Element, assets: &Assets, opts: &RenderOptions) {
+    // A turned element is drawn unturned inside a group that turns it, around the same
+    // point the editor turns it around.
+    let (angle, c) = el.rotation();
+    if angle != 0.0 {
+        let _ = writeln!(out, "<g transform=\"rotate({} {} {})\">", n(angle.to_degrees()), n(c[0]), n(c[1]));
+        unturned_svg(out, el, assets, opts);
+        out.push_str("</g>\n");
+    } else {
+        unturned_svg(out, el, assets, opts);
+    }
+}
+
+fn unturned_svg(out: &mut String, el: &Element, assets: &Assets, opts: &RenderOptions) {
     match el {
         Element::Stroke(s) if s.points.is_empty() => {}
         Element::Stroke(s) => match s.kind {
@@ -418,6 +431,7 @@ mod tests {
             color: Color::BLACK,
             width: 3.0,
             points: vec![InkPoint::new(1.0, 1.0, 0.5), InkPoint::new(30.0, 40.0, 1.0)],
+            group: 0,
         }));
         let svg = page_svg(&page, &Assets::new(), &RenderOptions::default());
         assert!(crate::export::parse_svg(&svg).is_ok());

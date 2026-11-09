@@ -90,6 +90,7 @@ pub fn excalidraw(pages: &[&Page], assets: &Assets) -> Result<String, ExportErro
         for el in &page.elements {
             let n = next();
             let id = format!("plexi-{n}");
+            let before = elements.len();
             match el {
                 Element::Stroke(s) if !s.points.is_empty() => {
                     let r = Rect::from_points(s.points.iter().map(|p| p.pos()));
@@ -181,6 +182,21 @@ pub fn excalidraw(pages: &[&Page], assets: &Assets) -> Result<String, ExportErro
                     elements.push(v);
                 }
             }
+            // Excalidraw turns everything around its box's center; a text box turns
+            // around its top-left corner, so its box moves to where that center went.
+            let (angle, _) = el.rotation();
+            if angle != 0.0
+                && elements.len() > before
+                && let Some(o) = elements.last_mut().and_then(Value::as_object_mut)
+            {
+                o.insert("angle".into(), json!(angle));
+                if let Element::Text(t) = el {
+                    let b = t.approx_bounds();
+                    let c = rotate_point(b.center(), t.pos, angle);
+                    o.insert("x".into(), json!(c[0] - b.width() / 2.0 + off[0]));
+                    o.insert("y".into(), json!(c[1] - b.height() / 2.0 + off[1]));
+                }
+            }
         }
     }
     let doc = json!({
@@ -223,17 +239,23 @@ pub fn drawio(pages: &[&Page], assets: &Assets) -> String {
                 continue;
             }
             let r = t.approx_bounds();
+            // draw.io turns a cell around its center: move the cell to where the center
+            // of the turned box is.
+            let w = r.width() * 1.2;
+            let c = rotate_point([t.pos[0] + w / 2.0, t.pos[1] + r.height() / 2.0], t.pos, t.rotation);
+            let pos = [c[0] - w / 2.0, c[1] - r.height() / 2.0];
             let _ = writeln!(
                 out,
-                "<mxCell id=\"text-{k}\" value=\"{}\" style=\"text;html=0;whiteSpace=wrap;align=left;verticalAlign=top;fontSize={};fontColor={};fontFamily={};fontStyle={};spacing=0;\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" as=\"geometry\"/></mxCell>",
+                "<mxCell id=\"text-{k}\" value=\"{}\" style=\"text;html=0;whiteSpace=wrap;align=left;verticalAlign=top;fontSize={};fontColor={};fontFamily={};fontStyle={};spacing=0;rotation={};\" vertex=\"1\" parent=\"1\"><mxGeometry x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" as=\"geometry\"/></mxCell>",
                 svg::esc(&t.text).replace('\n', "&#10;"),
                 svg::n(t.size),
                 t.color.hex_rgb(),
                 svg::esc(t.family()).replace(';', ""),
                 t.bold as u8 | (t.italic as u8) << 1 | (t.underline as u8) << 2,
-                svg::n(t.pos[0] - b.min[0]),
-                svg::n(t.pos[1] - b.min[1]),
-                svg::n(r.width() * 1.2),
+                svg::n(t.rotation.to_degrees()),
+                svg::n(pos[0] - b.min[0]),
+                svg::n(pos[1] - b.min[1]),
+                svg::n(w),
                 svg::n(r.height())
             );
         }

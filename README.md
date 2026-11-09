@@ -16,11 +16,14 @@ screen into a sheet of glass you draw on. Written in Rust.
   the edge of a sheet and the next sheet's outline appears there; PDF export prints one
   sheet per outline, or shrinks everything onto one.
 - **Snip, crop, style.** Snip any area of the screen into your notes
-  (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd>, anywhere), crop pictures, and set text
-  in any installed font, size, bold, italic or underline.
+  (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd>, anywhere), crop pictures or take out
+  their plain background, turn and resize anything, group things, and set text in any
+  installed font, size, bold, italic or underline.
 - **Type in your own handwriting.** Write a sample of each letter with the pen in the
   handwriting window (from the font picker, the File menu, or <kbd>Ctrl</kbd>+<kbd>K</kbd>);
-  Plexi builds a real font from it that renders the same way in every export.
+  Plexi builds a real font from it that renders the same way in every export. Make as
+  many as you like, each with its own name, and save any of them as a `.ttf` file to
+  install or use in other programs.
 - **Record to video.** <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> records the canvas
   as you work, or the whole screen while you draw on it, to an MP4 in your Downloads
   folder (Windows). A trail behind the pointer shows where it is; its color, size and
@@ -36,7 +39,8 @@ screen into a sheet of glass you draw on. Written in Rust.
   HTML, Markdown with images, plain text, Excalidraw, draw.io, InkML and JSON, with a live
   preview and your choice of paper size, orientation, margins and pixel size. Export or
   print just some sheets (<kbd>Ctrl</kbd>+<kbd>P</kbd>, then e.g. `1, 3, 5-7`), or just
-  an area you drag a box around, wherever the sheet outlines are.
+  an area you drag a box around, wherever the sheet outlines are, placed anywhere on the
+  sheet by dragging it in the preview.
 
 <p align="center"><img src="docs/showcase.gif" width="720" alt="Plexi drawing over another app, lassoing and copying ink, playing an animated GIF on the page, and typing in a font made from your own handwriting"></p>
 
@@ -78,10 +82,12 @@ and draw-on-screen covers the main display.
 | Colors, width | <kbd>1</kbd>–<kbd>9</kbd>, <kbd>[</kbd> <kbd>]</kbd> |
 | Pan, zoom | <kbd>G</kbd>+drag, right-drag, <kbd>Space</kbd>+drag, <kbd>Shift</kbd>+scroll, two fingers · scroll wheel, pinch |
 | Pages | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> new, <kbd>PgDn</kbd> / <kbd>PgUp</kbd>, trash button to delete (undoable) |
-| Images | paste or drop; drag a corner to resize freely (<kbd>Shift</kbd>: keep proportions) |
-| Text boxes | drag a corner to scale the text, font size and all; drag the handle on either side to set a wrap width (with the select, hand or text tool) |
-| Crop or lock an image, arrange, paper color, sheet outlines and numbers | right-click |
-| Export, print | <kbd>Ctrl</kbd>+<kbd>E</kbd> or <kbd>Ctrl</kbd>+<kbd>P</kbd>: pick sheets, or **Select area…** to drag a box around just a part (the last snapshot's area is offered too), then **Print…** opens the PDF to print |
+| Images, shapes | paste or drop images; drag a corner (or a line's end) to resize freely (<kbd>Shift</kbd>: keep proportions) |
+| Turn | drag the round handle above what's selected (<kbd>Shift</kbd>: 15° steps) |
+| Text boxes | drag a corner to resize: across sets the width, up and down the font size (<kbd>Shift</kbd>: scale both together); drag the handle on either side to set a wrap width; <kbd>F2</kbd> edits the selected box; <kbd>Ctrl</kbd>+<kbd>B</kbd> <kbd>Ctrl</kbd>+<kbd>I</kbd> <kbd>Ctrl</kbd>+<kbd>U</kbd> bold, italic, underline |
+| Group, ungroup | <kbd>Ctrl</kbd>+<kbd>G</kbd>, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd>, or right-click; a group is picked up and moved as one |
+| Crop or lock an image, remove its background, arrange, paper color, sheet outlines and numbers | right-click |
+| Export, print | <kbd>Ctrl</kbd>+<kbd>E</kbd> or <kbd>Ctrl</kbd>+<kbd>P</kbd>: pick sheets, or **Select area…** to drag a box around just a part (the last snapshot's area is offered too) and drag it in the preview to place it on the sheet, then **Print…** opens the PDF to print |
 | Everything else | <kbd>Ctrl</kbd>+<kbd>K</kbd> command palette, <kbd>F1</kbd> shortcuts |
 
 Paste or drop images straight onto a page. The tray icon (left-click) toggles drawing on

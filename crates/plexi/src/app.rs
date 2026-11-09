@@ -155,6 +155,8 @@ pub struct ExportDialog {
     /// [`Area::Region`]: printing or exporting a section of the canvas regardless of
     /// sheet outlines.
     pub region: Option<plexi_core::Rect>,
+    /// Where the area sits on its sheet, dragged in the preview (see `Layout::place`).
+    pub place: Option<[f32; 2]>,
     pub preview: crate::ui::Preview,
 }
 
@@ -176,6 +178,7 @@ impl ExportDialog {
             tile: self.tile,
             margin: self.margin_in * 96.0,
             region: self.region,
+            place: self.place,
         }
     }
 
@@ -1179,6 +1182,9 @@ impl PlexiApp {
                 e
             })
             .collect();
+        // Copies of a group make a new group of their own.
+        let mut copies = copies;
+        plexi_core::renew_groups(&mut copies, &mut Default::default());
         self.selection = copies.iter().map(Element::id).collect();
         self.page_mut(t).elements.extend(copies);
     }
@@ -1245,6 +1251,7 @@ impl PlexiApp {
             None => [24.0, 24.0],
         };
         let mut pasted = clip;
+        plexi_core::renew_groups(&mut pasted, &mut Default::default());
         let mut new_sel = HashSet::new();
         for e in &mut pasted {
             e.translate(offset[0], offset[1]);
@@ -1253,6 +1260,72 @@ impl PlexiApp {
         }
         self.page_mut(t).elements.extend(pasted);
         self.selection = new_sel;
+    }
+
+    /// Join everything selected into one group (leaving any group it was in), so it's
+    /// selected and moved as one.
+    pub fn group_selection(&mut self) {
+        if self.selection.len() < 2 {
+            return;
+        }
+        let t = self.target();
+        self.checkpoint(t);
+        let g = new_id();
+        let sel = self.selection.clone();
+        for e in self.page_mut(t).elements.iter_mut().filter(|e| sel.contains(&e.id())) {
+            e.set_group(g);
+        }
+        self.toast(format!("Grouped {} elements", sel.len()));
+    }
+
+    /// Break up any group in the selection; its members stay selected.
+    pub fn ungroup_selection(&mut self) {
+        let t = self.target();
+        let sel = self.selection.clone();
+        if !self.page_ref(t).elements.iter().any(|e| sel.contains(&e.id()) && e.group() != 0) {
+            return;
+        }
+        self.checkpoint(t);
+        for e in self.page_mut(t).elements.iter_mut().filter(|e| sel.contains(&e.id())) {
+            e.set_group(0);
+        }
+        self.toast("Ungrouped");
+    }
+
+    /// Whether the selection is something "Group" would change: two or more things, not
+    /// already all one group.
+    pub fn can_group(&self) -> bool {
+        let t = self.target();
+        let groups: HashSet<u64> =
+            self.page_ref(t).elements.iter().filter(|e| self.selection.contains(&e.id())).map(Element::group).collect();
+        self.selection.len() >= 2 && (groups.len() > 1 || groups.contains(&0))
+    }
+
+    /// Whether anything selected is in a group.
+    pub fn can_ungroup(&self) -> bool {
+        let t = self.target();
+        self.page_ref(t).elements.iter().any(|e| self.selection.contains(&e.id()) && e.group() != 0)
+    }
+
+    /// Take the plain background out of image `id`: whatever color runs in from its
+    /// edges becomes transparent.
+    pub fn remove_image_background(&mut self, t: Target, id: u64) {
+        let Some(Element::Image(img)) = self.page_ref(t).elements.iter().find(|e| e.id() == id) else { return };
+        let Some(bytes) = self.doc.assets.get(&img.asset).cloned() else { return };
+        let Some(png) = plexi_core::cutout::remove_background(&bytes) else {
+            self.toast_error("Couldn't find a plain background around the picture to take out");
+            return;
+        };
+        self.checkpoint(t);
+        let asset = self.doc.add_asset(png);
+        let page = self.page_mut(t);
+        let Some(i) = page.find(id) else { return };
+        if let Element::Image(img) = &mut page.elements[i] {
+            img.asset = asset;
+        }
+        page.elements[i].renew_id();
+        self.selection = [page.elements[i].id()].into();
+        self.toast("Background removed");
     }
 
     pub fn select_all(&mut self) {
@@ -1768,6 +1841,8 @@ impl PlexiApp {
             size: [w, h],
             locked: true,
             crop: None,
+            group: 0,
+            rotation: 0.0,
         }));
         if snip.is_none_or(|s| s.from != SnipFrom::Notebook) {
             page.elements.extend(self.doc.overlay.elements.iter().cloned());
@@ -1916,6 +1991,20 @@ impl PlexiApp {
             self.palette.query.clear();
             self.palette.selected = 0;
         }
+        // Bold, italic and underline: for the box being typed in, the selected boxes, or
+        // the next one (but not while typing in some other field).
+        if self.editing_text.is_some() || !ctx.egui_wants_keyboard_input() {
+            let style = self.text_style();
+            if cmd(Key::B) {
+                self.apply_text_style(move |tb| tb.bold = !style.bold);
+            }
+            if cmd(Key::I) {
+                self.apply_text_style(move |tb| tb.italic = !style.italic);
+            }
+            if cmd(Key::U) {
+                self.apply_text_style(move |tb| tb.underline = !style.underline);
+            }
+        }
         if typing {
             if ctx.input(|i| i.key_pressed(Key::Escape)) && self.editing_text.is_some() {
                 self.finish_text_edit();
@@ -1971,6 +2060,19 @@ impl PlexiApp {
         }
         if cmd(Key::D) {
             self.duplicate_selection();
+        }
+        if cmd_shift(Key::G) {
+            self.ungroup_selection();
+        } else if cmd(Key::G) {
+            self.group_selection();
+        }
+        if plain(Key::F2) {
+            // Edit the selected text box.
+            let t = self.target();
+            if let Some(tb) = self.selected_text(t) {
+                self.selection.clear();
+                self.begin_text_edit(t, tb.id);
+            }
         }
         // Ctrl+C / Ctrl+X / Ctrl+V arrive as clipboard events instead: see
         // `handle_drops_and_paste`.
@@ -2122,6 +2224,7 @@ impl PlexiApp {
             pick_pages: false,
             page_list: String::new(),
             region,
+            place: None,
             preview: Default::default(),
         });
     }
@@ -2130,6 +2233,7 @@ impl PlexiApp {
     pub fn set_export_area(&mut self, t: Target, area: plexi_core::Rect) {
         if let Some(dlg) = &mut self.export {
             dlg.region = Some(area);
+            dlg.place = None;
             dlg.area = Area::Region;
             dlg.scope = match t {
                 Target::Overlay => ExportScope::ScreenInk,
@@ -3496,9 +3600,371 @@ mod tests {
         }
         assert!(h.app.handwriting.samples.strokes('B').is_empty(), "untouched boxes stay empty");
 
-        let bytes = plexi_core::handwriting::build_font(&h.app.handwriting.samples);
+        let bytes = plexi_core::handwriting::build_font(&h.app.handwriting.samples, "Test");
         let face = ttf_parser::Face::parse(&bytes, 0).expect("a valid font came out of a real capture");
         assert!(face.glyph_index('A').is_some());
         assert!(face.glyph_index('B').is_none(), "characters never written fall back to the default font");
+    }
+
+    fn ctrl(k: Key, shift: bool) -> Event {
+        let modifiers = if shift { Modifiers::COMMAND | Modifiers::SHIFT } else { Modifiers::COMMAND };
+        Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    fn shape(h: &Harness) -> plexi_core::Shape {
+        h.elements()
+            .iter()
+            .find_map(|e| match e {
+                Element::Shape(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("a shape")
+    }
+
+    #[test]
+    fn the_rotate_handle_turns_the_selection() {
+        let mut h = Harness::new();
+        h.app.tool = Tool::Shape(ShapeKind::Rect);
+        h.drag(PointerButton::Primary, &[(300.0, 300.0), (400.0, 340.0), (500.0, 400.0)]);
+        h.app.tool = Tool::Hand;
+        h.click(300.0, 350.0);
+        let before = shape(&h);
+        assert_eq!(h.app.selection, HashSet::from([before.id]));
+        let (view, origin, t) = (h.app.view, h.app.canvas_origin, h.app.target());
+        let (handle, _) = h.app.rotate_handle(t, view, origin).expect("a rotate handle above the selection");
+        // Drag the handle from straight above the middle round to its right: a
+        // quarter turn clockwise.
+        let c = view.to_screen(origin, plexi_core::Rect::from_points([before.a, before.b]).center());
+        let right = c + egui::vec2(handle.distance(c), 0.0);
+        let mid = c + (egui::vec2(1.0, -1.0) * handle.distance(c) / 2f32.sqrt());
+        h.drag(PointerButton::Primary, &[(handle.x, handle.y), (mid.x, mid.y), (right.x, right.y)]);
+        let turned = shape(&h);
+        assert!((turned.rotation - std::f32::consts::FRAC_PI_2).abs() < 0.05, "{}", turned.rotation);
+        let b = Element::Shape(turned.clone()).bounds();
+        assert!(b.height() > b.width(), "a wide box turned on its end is tall: {b:?}");
+        assert!(h.app.selection.contains(&turned.id), "still selected");
+        // Its turned edge is where a click finds it now.
+        h.app.selection.clear();
+        let r = plexi_core::Rect::from_points([turned.a, turned.b]);
+        // Turned a quarter, its short sides are now on the left and right.
+        let edge = view.to_screen(origin, [r.center()[0] + r.height() / 2.0, r.center()[1]]);
+        h.click(edge.x, edge.y);
+        assert!(h.app.selection.contains(&turned.id), "found on its turned outline");
+        // Exports turn it the same way.
+        let svg = plexi_core::export::svg::page_svg(&h.app.doc.pages[0], &h.app.doc.assets, &Default::default());
+        assert!(svg.contains("rotate(90"), "{svg}");
+        h.app.undo();
+        assert_eq!(shape(&h).rotation, 0.0);
+
+        // Text and pictures turn too, all together around the middle of the selection.
+        let ctx = h.ctx.clone();
+        h.app.insert_image(png(80, 40), Some([600.0, 200.0]), &ctx);
+        h.app.insert_text("turn me".into(), &ctx);
+        h.app.select_all();
+        h.app.tool = Tool::Hand;
+        h.step(vec![]);
+        let (handle, _) = h.app.rotate_handle(t, view, origin).expect("handle");
+        let b = h.app.selection_bounds(t).unwrap();
+        let c = view.to_screen(origin, b.center());
+        h.set_shift(true); // snaps to 15° steps
+        let left = c - egui::vec2(handle.distance(c), -2.0);
+        let mid = c + (egui::vec2(-1.0, -1.0) * handle.distance(c) / 2f32.sqrt());
+        h.drag(PointerButton::Primary, &[(handle.x, handle.y), (mid.x, mid.y), (left.x, left.y)]);
+        h.set_shift(false);
+        for e in h.elements() {
+            if let Element::Text(_) | Element::Image(_) = e {
+                assert!((e.rotation().0 + std::f32::consts::FRAC_PI_2).abs() < 1e-3, "{:?}", e.rotation());
+            }
+        }
+        assert_eq!(h.app.selection.len(), 3);
+    }
+
+    #[test]
+    fn shapes_resize_by_their_handles() {
+        let mut h = Harness::new();
+        h.app.tool = Tool::Shape(ShapeKind::Line);
+        h.drag(PointerButton::Primary, &line(200.0, 400.0, 200.0));
+        h.app.tool = Tool::Lasso;
+        h.click(300.0, 200.0);
+        let l = shape(&h);
+        let (view, origin) = (h.app.view, h.app.canvas_origin);
+        let end = view.to_screen(origin, l.b);
+        h.drag(PointerButton::Primary, &[(end.x, end.y), (end.x, end.y + 50.0), (end.x, end.y + 100.0)]);
+        let moved = shape(&h);
+        assert_eq!(moved.a, l.a, "the other end stays put");
+        assert!((moved.b[1] - l.b[1] - 100.0 / view.zoom).abs() < 1.0, "{:?}", moved.b);
+        assert_eq!(h.elements().len(), 1, "nothing drawn, nothing moved");
+
+        // A rectangle's corner: the opposite corner stays where it was.
+        h.app.doc.pages[0].elements.clear();
+        h.app.tool = Tool::Shape(ShapeKind::Rect);
+        h.drag(PointerButton::Primary, &[(300.0, 300.0), (500.0, 400.0)]);
+        h.app.tool = Tool::Hand;
+        h.click(300.0, 350.0);
+        let r = shape(&h);
+        let corner = view.to_screen(origin, [r.a[0].max(r.b[0]), r.a[1].max(r.b[1])]);
+        h.drag(PointerButton::Primary, &[(corner.x, corner.y), (corner.x + 60.0, corner.y + 40.0)]);
+        let big = plexi_core::Rect::from_points([shape(&h).a, shape(&h).b]);
+        let small = plexi_core::Rect::from_points([r.a, r.b]);
+        assert_eq!(big.min, small.min);
+        assert!((big.width() - small.width() - 60.0 / view.zoom).abs() < 1.0, "{big:?}");
+        h.app.undo();
+        assert_eq!(plexi_core::Rect::from_points([shape(&h).a, shape(&h).b]), small);
+    }
+
+    #[test]
+    fn grouped_things_are_picked_up_together() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(200.0, 300.0, 200.0));
+        h.drag(PointerButton::Primary, &line(500.0, 600.0, 500.0));
+        h.drag(PointerButton::Primary, &line(200.0, 300.0, 650.0));
+        h.app.tool = Tool::Hand;
+        h.click(250.0, 200.0);
+        h.set_shift(true);
+        h.click(550.0, 500.0);
+        h.set_shift(false);
+        assert_eq!(h.app.selection.len(), 2);
+        h.step(vec![ctrl(Key::G, false)]);
+        let groups: HashSet<u64> = h.elements().iter().map(Element::group).collect();
+        assert_eq!(groups.len(), 2, "one group, and the stroke left out: {groups:?}");
+
+        // A click on either one picks up both, and a drag moves both.
+        h.app.selection.clear();
+        h.click(550.0, 500.0);
+        assert_eq!(h.app.selection.len(), 2);
+        let before: Vec<f32> = h.elements().iter().map(|e| e.bounds().min[0]).collect();
+        h.drag(PointerButton::Primary, &[(250.0, 200.0), (300.0, 200.0), (350.0, 200.0)]);
+        let after: Vec<f32> = h.elements().iter().map(|e| e.bounds().min[0]).collect();
+        assert!(after[0] > before[0] + 50.0 && after[1] > before[1] + 50.0, "{before:?} -> {after:?}");
+        assert_eq!(after[2], before[2], "the stroke outside the group stays");
+        // Each member still gets its own outline... as one group box.
+        assert_eq!(h.app.selection_outlines(h.app.target(), 1.0).len(), 1);
+
+        // Copies make a group of their own.
+        h.step(vec![ctrl(Key::D, false)]);
+        let groups: HashSet<u64> = h.elements().iter().map(Element::group).filter(|g| *g != 0).collect();
+        assert_eq!(groups.len(), 2, "the copies' group is new");
+
+        // Ungrouping lets go.
+        h.step(vec![ctrl(Key::G, true)]);
+        h.app.selection.clear();
+        h.app.tool = Tool::Hand;
+        let first = h.elements()[3].bounds().center();
+        let at = h.app.view.to_screen(h.app.canvas_origin, first);
+        h.click(at.x, at.y);
+        assert_eq!(h.app.selection.len(), 1, "on its own again");
+    }
+
+    #[test]
+    fn several_selected_things_each_get_an_outline() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(200.0, 300.0, 200.0));
+        h.drag(PointerButton::Primary, &line(600.0, 700.0, 600.0));
+        h.app.select_all();
+        h.step(vec![]);
+        let t = h.app.target();
+        assert_eq!(h.app.selection_outlines(t, 1.0).len(), 2);
+        // The gap between them isn't part of the selection: pressing there starts a
+        // new lasso instead of dragging both.
+        h.drag(PointerButton::Primary, &[(450.0, 400.0), (470.0, 420.0), (460.0, 440.0), (450.0, 405.0)]);
+        assert!(h.app.selection.is_empty());
+    }
+
+    #[test]
+    fn f2_and_ctrl_b_i_u_work_on_the_selected_text() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.insert_text("styled".into(), &ctx);
+        h.app.tool = Tool::Lasso;
+        let id = first_text(&h).id;
+        h.app.selection = [id].into();
+        h.step(vec![ctrl(Key::B, false)]);
+        h.step(vec![ctrl(Key::I, false)]);
+        h.step(vec![ctrl(Key::U, false)]);
+        let t = first_text(&h);
+        assert!(t.bold && t.italic && t.underline);
+        h.step(vec![ctrl(Key::B, false)]);
+        assert!(!first_text(&h).bold, "pressed again, it's off again");
+        h.step(vec![key(Key::F2)]);
+        assert_eq!(h.app.editing_text.map(|(_, id)| id), Some(first_text(&h).id), "F2 edits it");
+        // While typing, Ctrl+B still works on it.
+        h.step(vec![]);
+        h.step(vec![ctrl(Key::B, false)]);
+        assert!(first_text(&h).bold);
+    }
+
+    #[test]
+    fn text_box_corners_scale_freely_and_shift_keeps_proportions() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.insert_text("free scaling text".into(), &ctx);
+        h.app.tool = Tool::Hand;
+        let t = first_text(&h);
+        h.app.selection = [t.id].into();
+        h.step(vec![]);
+        let (view, origin) = (h.app.view, h.app.canvas_origin);
+        let b = t.approx_bounds();
+        let corner = view.to_screen(origin, b.max) + egui::vec2(4.0, 4.0);
+        // Straight across: wider, same font size.
+        h.drag(
+            PointerButton::Primary,
+            &[(corner.x, corner.y), (corner.x + 60.0, corner.y), (corner.x + 120.0, corner.y)],
+        );
+        let wide = first_text(&h);
+        assert!((wide.size - t.size).abs() < 0.6, "{} -> {}", t.size, wide.size);
+        assert!(wide.wrap.is_some_and(|w| w > b.width() + 100.0 / view.zoom), "{:?}", wide.wrap);
+        h.app.undo();
+        // Straight down: a bigger font.
+        h.app.selection = [first_text(&h).id].into();
+        h.step(vec![]);
+        h.drag(
+            PointerButton::Primary,
+            &[(corner.x, corner.y), (corner.x, corner.y + 30.0), (corner.x, corner.y + 60.0)],
+        );
+        assert!(first_text(&h).size > t.size * 1.5, "{}", first_text(&h).size);
+    }
+
+    #[test]
+    fn remove_background_from_the_right_click_menu() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        let mut img = image::RgbaImage::from_pixel(60, 40, image::Rgba([255, 255, 255, 255]));
+        for y in 10..30 {
+            for x in 20..40 {
+                img.put_pixel(x, y, image::Rgba([20, 90, 200, 255]));
+            }
+        }
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        h.app.insert_image(bytes.into_inner(), None, &ctx);
+        let el = image_el(&h);
+        h.app.remove_image_background(h.app.target(), el.id);
+        let cut = image_el(&h);
+        assert_ne!(cut.asset, el.asset);
+        let out = image::load_from_memory(&h.app.doc.assets[&cut.asset]).unwrap().to_rgba8();
+        assert_eq!(out.get_pixel(2, 2).0[3], 0);
+        assert_eq!(out.get_pixel(30, 20).0[3], 255);
+        h.app.undo();
+        assert_eq!(image_el(&h).asset, el.asset, "undo brings the background back");
+    }
+
+    #[test]
+    fn a_picked_area_can_be_dragged_around_its_sheet_in_the_preview() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(300.0, 400.0, 300.0));
+        h.app.open_export_dialog();
+        let t = h.app.target();
+        h.app.set_export_area(t, plexi_core::Rect::from_min_size([0.0, 0.0], [200.0, 150.0]));
+        if let Some(d) = &mut h.app.export {
+            d.paper = PaperChoice::Preset(0);
+        }
+        for _ in 0..40 {
+            h.step(vec![]);
+            if h.app.export.as_ref().is_some_and(|d| d.preview.ready()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let area = h.ctx.read_response(egui::Id::unique("export-place")).expect("the area is draggable").rect;
+        let from = area.center();
+        h.drag(PointerButton::Primary, &[(from.x, from.y), (from.x + 400.0, from.y + 400.0)]);
+        let place = h.app.export.as_ref().unwrap().place.expect("moved");
+        assert_eq!(place, [1.0, 1.0], "dragged into the bottom-right corner");
+    }
+
+    #[test]
+    fn handwriting_fonts_have_names_and_there_can_be_several() {
+        let mut h = Harness::new();
+        h.app.handwriting.open = true;
+        h.step(vec![]);
+        let rect = *h.app.handwriting.boxes.get(&'A').unwrap();
+        h.drag(PointerButton::Primary, &line(rect.left() + 4.0, rect.right() - 4.0, rect.center().y));
+        h.app.handwriting.name = "Neat".into();
+        let save = h.app.handwriting.save_button.unwrap().center();
+        h.click(save.x, save.y);
+        assert!(plexi_core::fonts::is_handwriting("Neat"));
+        assert_eq!(h.app.handwriting.library.fonts[0].name, "Neat");
+
+        // A second one, with its own name and samples.
+        h.app.handwriting.new_font();
+        assert_eq!(h.app.handwriting.current, 1);
+        assert!(h.app.handwriting.samples.is_empty());
+        h.step(vec![]);
+        let rect = *h.app.handwriting.boxes.get(&'B').unwrap();
+        h.drag(PointerButton::Primary, &line(rect.left() + 4.0, rect.right() - 4.0, rect.center().y));
+        h.app.handwriting.name = "Neat".into();
+        assert!(h.app.handwriting.name_problem().is_some(), "two fonts can't share a name");
+        h.app.handwriting.name = "Messy".into();
+        h.step(vec![]);
+        let save = h.app.handwriting.save_button.unwrap().center();
+        h.click(save.x, save.y);
+        assert!(plexi_core::fonts::is_handwriting("Messy") && plexi_core::fonts::is_handwriting("Neat"));
+
+        // Renaming one moves text set in it along.
+        h.app.handwriting.switch_to(0);
+        let ctx = h.ctx.clone();
+        h.app.insert_text("hi".into(), &ctx);
+        let id = first_text(&h).id;
+        h.app.selection = [id].into();
+        h.app.apply_text_style(|t| t.font = Some("Neat".into()));
+        h.app.handwriting.name = "Tidy".into();
+        h.step(vec![]);
+        let save = h.app.handwriting.save_button.unwrap().center();
+        h.click(save.x, save.y);
+        assert_eq!(first_text(&h).font.as_deref(), Some("Tidy"));
+        assert!(!plexi_core::fonts::is_handwriting("Neat"));
+
+        // Saved for next time.
+        let lib = plexi_core::handwriting::load(&config::handwriting_path());
+        let names: Vec<&str> = lib.fonts.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Tidy", "Messy"]);
+        for n in ["Tidy", "Messy"] {
+            plexi_core::fonts::set_handwriting(n, None);
+        }
+    }
+
+    #[test]
+    fn toasts_stay_on_one_line() {
+        // A longer message after a short one used to wrap to the short one's width,
+        // stacking its words one per line.
+        let mut h = Harness::new();
+        h.app.toast("Copied");
+        h.step(vec![]);
+        h.app.toast("Saved Plexi recording 3.mp4 in Downloads");
+        h.step(vec![]);
+        h.step(vec![]);
+        let r = h.ctx.memory(|m| m.area_rect(egui::Id::unique("toast"))).expect("shown");
+        assert!(r.height() < 45.0 && r.width() > 200.0, "{r:?}");
+    }
+
+    #[test]
+    fn a_turned_picture_resizes_from_its_turned_corners() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.insert_image(png(100, 50), None, &ctx);
+        let id = image_el(&h).id;
+        let i = h.app.doc.pages[0].find(id).unwrap();
+        let c = image_el(&h).pos;
+        h.app.doc.pages[0].elements[i].rotate_about([c[0] + 50.0, c[1] + 25.0], std::f32::consts::FRAC_PI_2);
+        let turned = Element::Image(image_el(&h));
+        h.app.selection = [turned.id()].into();
+        h.app.tool = Tool::Hand;
+        h.step(vec![]);
+        // Corners of the turned picture, clockwise from what was its top-left.
+        let o = turned.outline();
+        let (view, origin) = (h.app.view, h.app.canvas_origin);
+        let grab = view.to_screen(origin, o[2]);
+        // Pull that corner further along the picture's own width, which now runs down.
+        h.drag(PointerButton::Primary, &[(grab.x, grab.y), (grab.x, grab.y + 25.0), (grab.x, grab.y + 50.0)]);
+        let after = Element::Image(image_el(&h));
+        let Element::Image(img) = &after else { unreachable!() };
+        assert!((img.size[0] - 100.0 - 50.0 / view.zoom).abs() < 1.5, "wider in its own frame: {:?}", img.size);
+        let o2 = after.outline();
+        assert!(
+            (o2[0][0] - o[0][0]).abs() < 0.5 && (o2[0][1] - o[0][1]).abs() < 0.5,
+            "the opposite corner stays put: {:?} {:?}",
+            o[0],
+            o2[0]
+        );
     }
 }

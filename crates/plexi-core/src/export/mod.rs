@@ -254,6 +254,7 @@ mod tests {
             points: (0..20)
                 .map(|i| InkPoint::new(100.0 + i as f32 * 10.0, 200.0 + (i as f32).sin() * 20.0, 0.3 + i as f32 / 40.0))
                 .collect(),
+            group: 0,
         }));
         p.elements.push(Element::Stroke(Stroke {
             id: new_id(),
@@ -261,6 +262,7 @@ mod tests {
             color: Color::rgba(255, 220, 0, 110),
             width: 18.0,
             points: vec![InkPoint::new(80.0, 300.0, 0.5), InkPoint::new(400.0, 300.0, 0.5)],
+            group: 0,
         }));
         p.elements.push(Element::Text(TextBox::new(
             [100.0, 400.0],
@@ -275,6 +277,8 @@ mod tests {
             size: [40.0, 40.0],
             locked: false,
             crop: None,
+            group: 0,
+            rotation: 0.0,
         }));
         for kind in [ShapeKind::Line, ShapeKind::Arrow, ShapeKind::Rect, ShapeKind::Ellipse] {
             p.elements.push(Element::Shape(Shape {
@@ -284,6 +288,8 @@ mod tests {
                 b: [300.0, 700.0],
                 color: Color::rgb(200, 0, 0),
                 width: 3.0,
+                group: 0,
+                rotation: 0.0,
             }));
         }
         let mut p2 = Page::new("Infinite", PageSize::Infinite);

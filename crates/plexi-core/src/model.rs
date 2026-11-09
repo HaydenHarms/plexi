@@ -22,6 +22,24 @@ pub fn new_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
+}
+
+/// `p` turned by `angle` radians (clockwise on screen, where y points down) around `c`.
+pub fn rotate_point(p: [f32; 2], c: [f32; 2], angle: f32) -> [f32; 2] {
+    if angle == 0.0 {
+        return p;
+    }
+    let (s, k) = angle.sin_cos();
+    let (dx, dy) = (p[0] - c[0], p[1] - c[1]);
+    [c[0] + dx * k - dy * s, c[1] + dx * s + dy * k]
+}
+
 /// Straight (not premultiplied) RGBA. Serialized as `#rrggbbaa`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(into = "String", try_from = "String")]
@@ -166,6 +184,9 @@ pub struct Stroke {
     pub width: f32,
     #[serde(with = "flat_points")]
     pub points: Vec<InkPoint>,
+    /// Elements sharing a nonzero group are selected and moved together.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub group: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -190,6 +211,11 @@ pub struct TextBox {
     /// `None` is the old behavior: one line per `\n`, sized to the longest of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap: Option<f32>,
+    /// Turned this many radians (clockwise) around `pos`, its top-left corner.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub rotation: f32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub group: u64,
 }
 
 /// The font text boxes use unless another is picked. It is bundled, so it looks the same
@@ -210,6 +236,8 @@ impl TextBox {
             italic: false,
             underline: false,
             wrap: None,
+            rotation: 0.0,
+            group: 0,
         }
     }
 
@@ -311,11 +339,16 @@ pub struct ImageEl {
     /// shown part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<[f32; 4]>,
+    /// Turned this many radians (clockwise) around its center.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub rotation: f32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub group: u64,
 }
 
 impl ImageEl {
     pub fn new(asset: String, pos: [f32; 2], size: [f32; 2]) -> Self {
-        Self { id: new_id(), asset, pos, size, locked: false, crop: None }
+        Self { id: new_id(), asset, pos, size, locked: false, crop: None, rotation: 0.0, group: 0 }
     }
 
     /// The crop as `[left, top, right, bottom]` fractions, the whole picture if uncropped.
@@ -372,9 +405,20 @@ pub struct Shape {
     pub b: [f32; 2],
     pub color: Color,
     pub width: f32,
+    /// Rectangles and ellipses: turned this many radians (clockwise) around their
+    /// center. Lines and arrows turn by moving their ends instead, so it stays 0.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub rotation: f32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub group: u64,
 }
 
 impl Shape {
+    /// A shape with no rotation and no group.
+    pub fn new(kind: ShapeKind, a: [f32; 2], b: [f32; 2], color: Color, width: f32) -> Self {
+        Self { id: new_id(), kind, a, b, color, width, rotation: 0.0, group: 0 }
+    }
+
     /// The two short strokes of an arrow head at `b`, in page units.
     pub fn arrow_head(&self) -> Option<[[f32; 2]; 2]> {
         let dx = self.b[0] - self.a[0];
@@ -429,7 +473,8 @@ impl Element {
         }
     }
 
-    pub fn bounds(&self) -> Rect {
+    /// The extent before any rotation: the element as if it weren't turned.
+    pub fn local_bounds(&self) -> Rect {
         match self {
             Element::Stroke(s) => {
                 let pad = s.width * 1.6 * 0.5 + 1.0;
@@ -437,8 +482,101 @@ impl Element {
             }
             Element::Text(t) => t.approx_bounds(),
             Element::Image(i) => Rect::from_min_size(i.pos, i.size),
-            Element::Shape(s) => Rect::from_points([s.a, s.b]).expand(s.width * 4.0 + 6.0),
+            Element::Shape(s) => {
+                let pad = match s.kind {
+                    ShapeKind::Line | ShapeKind::Arrow => s.width * 4.0 + 6.0,
+                    ShapeKind::Rect | ShapeKind::Ellipse => s.width * 0.5 + 1.0,
+                };
+                Rect::from_points([s.a, s.b]).expand(pad)
+            }
         }
+    }
+
+    /// How far the element is turned (radians, clockwise), and the point it turns
+    /// around. Ink and lines are turned by moving their points, so theirs is 0.
+    pub fn rotation(&self) -> (f32, [f32; 2]) {
+        match self {
+            Element::Stroke(_) => (0.0, [0.0, 0.0]),
+            Element::Text(t) => (t.rotation, t.pos),
+            Element::Image(i) => (i.rotation, [i.pos[0] + i.size[0] / 2.0, i.pos[1] + i.size[1] / 2.0]),
+            Element::Shape(s) => (s.rotation, Rect::from_points([s.a, s.b]).center()),
+        }
+    }
+
+    /// The corners of [`Self::local_bounds`], turned with the element: its outline.
+    pub fn outline(&self) -> [[f32; 2]; 4] {
+        let b = self.local_bounds();
+        let (a, c) = self.rotation();
+        [b.min, [b.max[0], b.min[1]], b.max, [b.min[0], b.max[1]]].map(|p| rotate_point(p, c, a))
+    }
+
+    /// `p` (page units) in the element's own unturned frame: hit test it against the
+    /// element as if it weren't rotated.
+    pub fn to_local(&self, p: [f32; 2]) -> [f32; 2] {
+        let (a, c) = self.rotation();
+        rotate_point(p, c, -a)
+    }
+
+    pub fn bounds(&self) -> Rect {
+        if self.rotation().0 == 0.0 {
+            return self.local_bounds();
+        }
+        Rect::from_points(self.outline())
+    }
+
+    pub fn group(&self) -> u64 {
+        match self {
+            Element::Stroke(s) => s.group,
+            Element::Text(t) => t.group,
+            Element::Image(i) => i.group,
+            Element::Shape(s) => s.group,
+        }
+    }
+
+    pub fn set_group(&mut self, g: u64) {
+        match self {
+            Element::Stroke(s) => s.group = g,
+            Element::Text(t) => t.group = g,
+            Element::Image(i) => i.group = g,
+            Element::Shape(s) => s.group = g,
+        }
+    }
+
+    /// Turn the element by `angle` radians around `c`.
+    pub fn rotate_about(&mut self, c: [f32; 2], angle: f32) {
+        let turn = |p: &mut [f32; 2]| *p = rotate_point(*p, c, angle);
+        match self {
+            Element::Stroke(s) => {
+                for p in &mut s.points {
+                    let q = rotate_point([p.x, p.y], c, angle);
+                    (p.x, p.y) = (q[0], q[1]);
+                }
+            }
+            Element::Shape(s) if matches!(s.kind, ShapeKind::Line | ShapeKind::Arrow) => {
+                turn(&mut s.a);
+                turn(&mut s.b);
+            }
+            Element::Shape(s) => {
+                let m = Rect::from_points([s.a, s.b]).center();
+                let n = rotate_point(m, c, angle);
+                for p in [&mut s.a, &mut s.b] {
+                    p[0] += n[0] - m[0];
+                    p[1] += n[1] - m[1];
+                }
+                s.rotation = tidy_angle(s.rotation + angle);
+            }
+            Element::Text(t) => {
+                turn(&mut t.pos);
+                t.rotation = tidy_angle(t.rotation + angle);
+            }
+            Element::Image(i) => {
+                let m = [i.pos[0] + i.size[0] / 2.0, i.pos[1] + i.size[1] / 2.0];
+                let n = rotate_point(m, c, angle);
+                i.pos = [n[0] - i.size[0] / 2.0, n[1] - i.size[1] / 2.0];
+                i.rotation = tidy_angle(i.rotation + angle);
+            }
+        }
+        self.renew_id();
     }
 
     pub fn translate(&mut self, dx: f32, dy: f32) {
@@ -480,6 +618,14 @@ impl Element {
         }
         self.renew_id();
     }
+}
+
+/// An angle brought into -π..=π, and snapped to exactly 0 when it's within a hair of it
+/// (so turning something back to straight leaves no rotation behind).
+pub fn tidy_angle(a: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let a = (a + PI).rem_euclid(TAU) - PI;
+    if a.abs() < 1e-4 { 0.0 } else { a }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -635,6 +781,15 @@ impl Document {
         key
     }
 
+    /// Give every group a fresh id, so groups read from a file can't share an id with
+    /// one made in this session. Elements that were grouped together stay together.
+    pub fn renew_groups(&mut self) {
+        let mut map = std::collections::HashMap::new();
+        for page in self.pages.iter_mut().chain(std::iter::once(&mut self.overlay)) {
+            renew_groups(&mut page.elements, &mut map);
+        }
+    }
+
     /// Drop assets no element references any more.
     pub fn prune_assets(&mut self) {
         let used: std::collections::HashSet<&str> = self
@@ -649,6 +804,18 @@ impl Document {
             .collect();
         let used: std::collections::HashSet<String> = used.into_iter().map(str::to_owned).collect();
         self.assets.retain(|k, _| used.contains(k));
+    }
+}
+
+/// Give the groups in `elements` fresh ids (the same fresh id for every member of a
+/// group), reusing `map` across calls. Used on load and for pasted or duplicated copies,
+/// which must not join the group they were copied from.
+pub fn renew_groups(elements: &mut [Element], map: &mut std::collections::HashMap<u64, u64>) {
+    for e in elements {
+        let g = e.group();
+        if g != 0 {
+            e.set_group(*map.entry(g).or_insert_with(new_id));
+        }
     }
 }
 
@@ -681,7 +848,9 @@ mod tests {
             color: Color::BLACK,
             width: 3.0,
             points: vec![InkPoint::new(1.0, 2.0, 0.5), InkPoint::new(3.25, 4.0, 1.0)],
+            group: 0,
         });
+        assert!(!serde_json::to_string(&s).unwrap().contains("group"), "no group, nothing saved");
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"points\":[1.0,2.0,0.5,3.25,4.0,1.0]"), "{json}");
         let back: Element = serde_json::from_str(&json).unwrap();
@@ -738,6 +907,54 @@ mod tests {
         img.set_crop(Rect::from_min_size([100.0, 100.0], [100.0, 100.0]));
         img.uncrop();
         assert_eq!((img.pos, img.size, img.crop), ([100.0, 100.0], [200.0, 100.0], None));
+    }
+
+    #[test]
+    fn rotating_turns_every_kind_of_element_around_a_point() {
+        use std::f32::consts::FRAC_PI_2;
+        let c = [0.0, 0.0];
+        // A quarter turn clockwise (y down): +x goes to +y.
+        let q = rotate_point([10.0, 0.0], c, FRAC_PI_2);
+        assert!((q[0]).abs() < 1e-4 && (q[1] - 10.0).abs() < 1e-4, "{q:?}");
+
+        let mut img = Element::Image(ImageEl::new("a.png".into(), [10.0, -5.0], [20.0, 10.0]));
+        img.rotate_about(c, FRAC_PI_2);
+        let Element::Image(i) = &img else { unreachable!() };
+        assert!((i.rotation - FRAC_PI_2).abs() < 1e-5);
+        // Its center (20, 0) went to (0, 20), size unchanged.
+        assert!((i.pos[0] + 10.0).abs() < 1e-3 && (i.pos[1] - 15.0).abs() < 1e-3, "{:?}", i.pos);
+        // Turned on its side, its bounds are 10 wide and 20 tall.
+        let b = img.bounds();
+        assert!((b.width() - 10.0).abs() < 1e-3 && (b.height() - 20.0).abs() < 1e-3, "{b:?}");
+        // A point on the turned image is inside it in its own frame.
+        let local = img.to_local([0.0, 28.0]);
+        assert!(img.local_bounds().contains(local), "{local:?}");
+
+        let mut line = Element::Shape(Shape::new(ShapeKind::Line, [0.0, 0.0], [10.0, 0.0], Color::BLACK, 2.0));
+        line.rotate_about(c, FRAC_PI_2);
+        let Element::Shape(s) = &line else { unreachable!() };
+        assert_eq!(s.rotation, 0.0, "lines turn by moving their ends");
+        assert!((s.b[1] - 10.0).abs() < 1e-4);
+
+        // Four quarter turns come back to no rotation at all.
+        for _ in 0..3 {
+            img.rotate_about(c, FRAC_PI_2);
+        }
+        let Element::Image(i) = &img else { unreachable!() };
+        assert_eq!(i.rotation, 0.0);
+    }
+
+    #[test]
+    fn groups_survive_saving_but_get_fresh_ids() {
+        let mut d = Document::new("t");
+        for x in [0.0, 50.0, 100.0] {
+            let mut s = Shape::new(ShapeKind::Rect, [x, 0.0], [x + 10.0, 10.0], Color::BLACK, 1.0);
+            s.group = if x < 90.0 { 7 } else { 0 };
+            d.pages[0].elements.push(Element::Shape(s));
+        }
+        d.renew_groups();
+        let g: Vec<u64> = d.pages[0].elements.iter().map(Element::group).collect();
+        assert!(g[0] != 0 && g[0] != 7 && g[0] == g[1] && g[2] == 0, "{g:?}");
     }
 
     #[test]

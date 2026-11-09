@@ -334,6 +334,7 @@ pub fn erase_partial(stroke: &Stroke, c: [f32; 2], radius: f32) -> Option<Vec<St
                 color: stroke.color,
                 width: stroke.width,
                 points: simplify(run, 0.1),
+                group: stroke.group,
             });
         }
         run.clear();
@@ -361,6 +362,7 @@ mod tests {
             color: Color::BLACK,
             width: 4.0,
             points: (0..n).map(|i| InkPoint::new(i as f32 * 10.0, 0.0, 0.5)).collect(),
+            group: 0,
         }
     }
 
