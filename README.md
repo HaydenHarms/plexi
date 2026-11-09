@@ -35,8 +35,6 @@ screen into a sheet of glass you draw on. Written in Rust.
 
 <p align="center"><img src="docs/showcase.gif" width="720" alt="Plexi drawing over another app, lassoing and copying ink, playing an animated GIF on the page, and typing in a font made from your own handwriting"></p>
 
-<p align="center"><img src="docs/tour.gif" width="720" alt="A tour of Plexi: handwriting, images, zooming the endless page, paper colors and export"></p>
-
 ## Download
 
 Grab the latest build from [Releases](https://github.com/HaydenHarms/plexi/releases):
