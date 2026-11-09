@@ -139,6 +139,12 @@ mod imp {
         }
     }
 
+    /// A number that changes whenever anything is copied to the system clipboard, by any
+    /// app.
+    pub fn clipboard_sequence() -> Option<u32> {
+        Some(unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() })
+    }
+
     /// Add or remove the window's taskbar button. The overlay lives in the tray instead.
     pub fn show_in_taskbar(h: isize, show: bool) {
         use windows::Win32::System::Com::{
@@ -279,6 +285,10 @@ mod imp {
     }
     pub fn show_in_taskbar(_: isize, _: bool) {}
     pub fn attach_parent_console() {}
+    /// Unknown here: Plexi's own copy is then always the one pasted.
+    pub fn clipboard_sequence() -> Option<u32> {
+        None
+    }
 
     /// The primary display as straight RGBA. macOS asks for Screen Recording permission
     /// the first time.

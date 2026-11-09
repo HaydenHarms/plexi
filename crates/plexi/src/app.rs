@@ -265,6 +265,10 @@ pub struct PlexiApp {
     /// The last copied selection (Ctrl+C), pasted back with Ctrl+V. Elements keep their
     /// ids until paste gives the copies fresh ones, so repeated pastes don't collide.
     pub clip: Option<Vec<Element>>,
+    /// The system clipboard's change count when `clip` was copied: while it's unchanged,
+    /// nothing was copied anywhere since, so Ctrl+V pastes `clip` rather than what's on
+    /// the system clipboard.
+    clip_sequence: Option<u32>,
     pub editing_text: Option<(Target, u64)>,
     pub text_buf: String,
     pub text_focus_pending: bool,
@@ -345,6 +349,7 @@ impl PlexiApp {
             pending_snapshot: None,
             selection: HashSet::new(),
             clip: None,
+            clip_sequence: None,
             editing_text: None,
             text_buf: String::new(),
             text_focus_pending: false,
@@ -1094,8 +1099,18 @@ impl PlexiApp {
             return;
         }
         let events = ctx.input(|i| i.events.clone());
+        // On Windows (and Linux), Ctrl+C, Ctrl+X and Ctrl+V come through as these events,
+        // not as key presses.
         for ev in events {
             match ev {
+                egui::Event::Copy => self.copy_selection(),
+                egui::Event::Cut => {
+                    self.copy_selection();
+                    self.delete_selection();
+                }
+                egui::Event::Paste(_) | egui::Event::PasteImage(_) if self.own_clip_is_newest() => {
+                    self.paste_selection(ctx)
+                }
                 egui::Event::PasteImage(img) => {
                     let mut out = std::io::Cursor::new(Vec::new());
                     let rgba =
@@ -1153,9 +1168,8 @@ impl PlexiApp {
     }
 
     /// Copy the selection (works the same for the lasso and the rectangle select tool)
-    /// onto Plexi's own clipboard, ready for [`PlexiApp::paste_selection`]. Also puts a
-    /// PNG of the selection on the system clipboard, so it can be pasted into other
-    /// apps too — best-effort, and never at the cost of the internal copy.
+    /// onto Plexi's own clipboard, ready for [`PlexiApp::paste_selection`]. The system
+    /// clipboard is left alone (the snapshot tool is for copying a picture out).
     pub fn copy_selection(&mut self) {
         if self.selection.is_empty() {
             return;
@@ -1168,7 +1182,14 @@ impl PlexiApp {
         }
         let n = elements.len();
         self.clip = Some(elements);
+        self.clip_sequence = platform::clipboard_sequence();
         self.toast(if n == 1 { "Copied".to_owned() } else { format!("Copied {n} elements") });
+    }
+
+    /// Whether Plexi's own copy is the latest thing copied, so Ctrl+V should paste it
+    /// rather than what's on the system clipboard.
+    fn own_clip_is_newest(&self) -> bool {
+        self.clip.is_some() && self.clip_sequence == platform::clipboard_sequence()
     }
 
     /// The snapshot tool: copy `area` of target `t` to the system clipboard as a
@@ -1892,12 +1913,8 @@ impl PlexiApp {
         if cmd(Key::D) {
             self.duplicate_selection();
         }
-        if cmd(Key::C) {
-            self.copy_selection();
-        }
-        if cmd(Key::V) {
-            self.paste_selection(ctx);
-        }
+        // Ctrl+C / Ctrl+X / Ctrl+V arrive as clipboard events instead: see
+        // `handle_drops_and_paste`.
         if cmd(Key::Comma) {
             self.settings_open = !self.settings_open;
         }
@@ -2650,12 +2667,17 @@ mod tests {
         let ctx = h.ctx.clone();
         h.app.insert_image(gif(&[[255, 0, 0, 255], [0, 255, 0, 255]], 100), None, &ctx);
         h.step(vec![]);
-        h.app.copy_selection();
+        // The way a real Ctrl+C and Ctrl+V arrive: as clipboard events, the paste carrying
+        // whatever text is on the system clipboard. Nothing was copied anywhere else in
+        // between, so Plexi's own copy (the animated GIF itself) is what's pasted.
+        h.step(vec![Event::Copy]);
+        assert!(h.app.clip.is_some(), "Ctrl+C copied the GIF");
         h.app.enter_overlay(&ctx, false);
         for _ in 0..4 {
             h.step(vec![]);
         }
-        h.app.paste_selection(&ctx);
+        h.step(vec![Event::Paste("some old text".into())]);
+        assert_eq!(h.app.doc.overlay.elements.len(), 1, "just the GIF, not the text too");
         let asset = h
             .app
             .doc
@@ -3034,6 +3056,22 @@ mod tests {
         }
         let toast = h.app.toast.as_ref().expect("a toast");
         assert!(toast.error && toast.text.contains("nothing was recorded"), "{}", toast.text);
+    }
+
+    #[test]
+    fn ctrl_x_and_ctrl_v_cut_and_paste_inside_plexi() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
+        h.app.tool = Tool::Hand;
+        h.click(400.0, 300.0);
+        assert_eq!(h.app.selection.len(), 1);
+        h.step(vec![Event::Cut]);
+        assert!(h.elements().is_empty(), "cut takes it off the page");
+        h.step(vec![Event::Paste("text on the system clipboard".into())]);
+        assert_eq!(h.elements().len(), 1, "and paste puts the stroke back, not the text");
+        assert!(matches!(h.elements()[0], Element::Stroke(_)));
+        h.step(vec![Event::Paste("again".into())]);
+        assert_eq!(h.elements().len(), 2, "it can be pasted again");
     }
 
     #[test]
