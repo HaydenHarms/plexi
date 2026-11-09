@@ -95,6 +95,7 @@ pub enum Icon {
     Right,
     Notebook,
     Snip,
+    Record,
 }
 
 fn tool_icon(t: Tool) -> Icon {
@@ -242,6 +243,11 @@ pub fn paint_icon(p: &Painter, r: Rect, icon: Icon, c: Color32) {
             p.circle_stroke(at(11.5, 11.5), 2.3 * s, st);
             line(&[(6.2, 9.8), (12.5, 2.0)]);
             line(&[(9.8, 9.8), (3.5, 2.0)]);
+        }
+        Icon::Record => {
+            // A ring with a dot: the usual "record" mark.
+            p.circle_stroke(at(8.0, 8.0), 6.0 * s, st);
+            p.circle_filled(at(8.0, 8.0), 3.0 * s, st.color);
         }
     }
 }
@@ -596,6 +602,7 @@ pub fn notebook(app: &mut PlexiApp, ui: &mut Ui, rect: Rect) {
                     if icon_button(ui, Icon::Snip, false, &tip).clicked() {
                         app.start_snip(&ctx);
                     }
+                    record_button(app, ui);
                     let tip = format!("Draw on your screen ({})", app.config.hotkey_draw);
                     if accent_button(ui, Icon::Screen, "Draw on screen").on_hover_text(tip).clicked() {
                         app.enter_overlay(&ctx, false);
@@ -622,6 +629,32 @@ pub fn notebook(app: &mut PlexiApp, ui: &mut Ui, rect: Rect) {
                 }
             });
         });
+}
+
+/// Start recording; while recording, a red dot with the time so far that stops it.
+fn record_button(app: &mut PlexiApp, ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
+    let Some(r) = &app.recording else {
+        if icon_button(ui, Icon::Record, false, "Record the canvas, or the screen while drawing on it (Ctrl+Shift+R)")
+            .clicked()
+        {
+            app.toggle_recording(&ctx);
+        }
+        return;
+    };
+    let secs = r.elapsed().as_secs();
+    let text = format!("{}:{:02}", secs / 60, secs % 60);
+    let galley = ui.painter().layout_no_wrap(text, egui::FontId::monospace(13.0), Color32::WHITE);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 32.0, 30.0), Sense::click());
+    let red = Color32::from_rgb(0xd9, 0x30, 0x30);
+    ui.painter().rect_filled(rect, 8.0, if resp.hovered() { red.gamma_multiply(0.85) } else { red });
+    ui.painter().circle_filled(rect.left_center() + vec2(13.0, 0.0), 4.5, Color32::WHITE);
+    ui.painter().galley(rect.min + vec2(24.0, (30.0 - galley.size().y) / 2.0), galley, Color32::WHITE);
+    if resp.on_hover_text("Stop recording (Ctrl+Shift+R)").clicked() {
+        app.toggle_recording(&ctx);
+    }
+    // The clock ticks over once a second.
+    ctx.request_repaint_after(std::time::Duration::from_millis(250));
 }
 
 fn accent_button(ui: &mut Ui, icon: Icon, text: &str) -> Response {
@@ -1026,6 +1059,7 @@ pub fn overlay(app: &mut PlexiApp, ui: &mut Ui, rect: Rect, o: &Overlay) {
                             app.open_export_dialog();
                         }
                     });
+                    record_button(app, ui);
                     vsep(ui);
                     let tip = format!(
                         "Click-through: keep the ink, use your desktop (Esc). {} to draw again",
@@ -1070,6 +1104,7 @@ enum Cmd {
     SheetGuides,
     SheetNumbers,
     Snip,
+    Record,
     Fit,
     SelectAll,
     Delete,
@@ -1099,6 +1134,11 @@ fn commands(app: &PlexiApp) -> Vec<(Cmd, String, String)> {
         (Cmd::SaveAs, "Save as…".into(), "Ctrl+Shift+S".into()),
         (Cmd::Export, "Export or print… (PDF, PNG, SVG, Markdown, …)".into(), "Ctrl+E".into()),
         (Cmd::Snip, "Snip an area of the screen".into(), hk.hotkey_snip.clone()),
+        (
+            Cmd::Record,
+            "Start or stop recording (canvas, or the screen while drawing on it)".into(),
+            "Ctrl+Shift+R".into(),
+        ),
         (Cmd::AddPage, "Add page".into(), "Ctrl+Enter".into()),
         (Cmd::DeletePage, "Delete page".into(), String::new()),
         (Cmd::NextPage, "Next page".into(), "PgDn".into()),
@@ -1203,6 +1243,7 @@ fn run_cmd(app: &mut PlexiApp, ctx: &Context, cmd: Cmd) {
         Cmd::SheetGuides => app.config.sheet_guides = !app.config.sheet_guides,
         Cmd::SheetNumbers => app.config.sheet_numbers = !app.config.sheet_numbers,
         Cmd::Snip => app.start_snip(ctx),
+        Cmd::Record => app.toggle_recording(ctx),
         Cmd::Fit => app.fit_pending = true,
         Cmd::SelectAll => app.select_all(),
         Cmd::Delete => app.delete_selection(),
@@ -1887,6 +1928,7 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
             ("Clear screen ink", app.config.hotkey_clear.clone()),
             ("Back to notebook", app.config.hotkey_notebook.clone()),
             ("Snip an area of the screen", app.config.hotkey_snip.clone()),
+            ("Record to video: the canvas, or the whole screen while drawing on it", "Ctrl+Shift+R".into()),
             ("Command palette", "Ctrl+K".into()),
             ("Pen · Highlighter · Eraser", "P · H · E".into()),
             ("Select (lasso) · Rectangle select · Hand · Text", "S · M · G · T".into()),

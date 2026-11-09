@@ -1,5 +1,6 @@
 //! Everything that talks to Win32 directly lives here: overlay window placement, screen
-//! capture, and attaching to the parent console for command-line use.
+//! capture, video encoding for recordings, and attaching to the parent console for
+//! command-line use.
 //!
 //! Elsewhere the native window handle is not used: the overlay is placed with viewport
 //! commands instead (see `PlexiApp::drive_overlay`), and on macOS screenshots go through
@@ -162,6 +163,98 @@ mod imp {
     pub fn capture_main_screen() -> Option<image::RgbaImage> {
         cursor_monitor().and_then(capture)
     }
+
+    /// An MP4 (H.264) file being written one frame at a time, with Windows' own Media
+    /// Foundation encoder. Create it, `write` and `finish` it on the same thread.
+    pub struct VideoWriter {
+        writer: windows::Win32::Media::MediaFoundation::IMFSinkWriter,
+        stream: u32,
+        frame_len: usize,
+    }
+
+    impl VideoWriter {
+        /// Start a `w` x `h` video at `path` (both even, at most 4096 x 2304), at about
+        /// `fps` frames a second.
+        pub fn create(path: &std::path::Path, w: u32, h: u32, fps: u32) -> Result<Self, String> {
+            use windows::Win32::Media::MediaFoundation::*;
+            use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+            let err = |what: &str, e: windows::core::Error| format!("{what}: {}", e.message());
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+                MFStartup(MF_VERSION, MFSTARTUP_FULL).map_err(|e| err("Media Foundation", e))?;
+                let url = windows::core::HSTRING::from(path.as_os_str());
+                // A hardware encoder if there is one: far less work for the CPU.
+                let writer = (|| {
+                    let mut attrs = None;
+                    MFCreateAttributes(&mut attrs, 1)?;
+                    let attrs = attrs.ok_or_else(windows::core::Error::empty)?;
+                    attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
+                    MFCreateSinkWriterFromURL(&url, None, &attrs)
+                })()
+                .or_else(|_| MFCreateSinkWriterFromURL(&url, None, None))
+                .map_err(|e| err("Couldn't create the video file", e))?;
+                let size = ((w as u64) << 32) | h as u64;
+                let rate = ((fps as u64) << 32) | 1;
+                let typed = |subtype: &windows::core::GUID| -> windows::core::Result<IMFMediaType> {
+                    let t = MFCreateMediaType()?;
+                    t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+                    t.SetGUID(&MF_MT_SUBTYPE, subtype)?;
+                    t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+                    t.SetUINT64(&MF_MT_FRAME_SIZE, size)?;
+                    t.SetUINT64(&MF_MT_FRAME_RATE, rate)?;
+                    t.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1 << 32) | 1)?;
+                    Ok(t)
+                };
+                let out = typed(&MFVideoFormat_H264).map_err(|e| err("Video format", e))?;
+                // About 0.12 bits a pixel: crisp for ink and text at screen sizes.
+                let bitrate = ((w as f64 * h as f64 * fps as f64 * 0.12) as u32).clamp(2_000_000, 40_000_000);
+                out.SetUINT32(&MF_MT_AVG_BITRATE, bitrate).map_err(|e| err("Video format", e))?;
+                let stream = writer.AddStream(&out).map_err(|e| err("Video stream", e))?;
+                let input = typed(&MFVideoFormat_RGB32).map_err(|e| err("Video format", e))?;
+                // Rows top to bottom (a negative or missing stride would mean bottom-up).
+                input.SetUINT32(&MF_MT_DEFAULT_STRIDE, w * 4).map_err(|e| err("Video format", e))?;
+                writer.SetInputMediaType(stream, &input, None).map_err(|e| err("Video size", e))?;
+                writer.BeginWriting().map_err(|e| err("Couldn't start the video", e))?;
+                Ok(Self { writer, stream, frame_len: (w * h * 4) as usize })
+            }
+        }
+
+        /// Add a frame: `bgra` is `w * h` pixels, rows top to bottom, in Windows' byte
+        /// order (blue, green, red, unused). `time` and `duration` are in seconds.
+        pub fn write(&mut self, bgra: &[u8], time: f64, duration: f64) -> Result<(), String> {
+            use windows::Win32::Media::MediaFoundation::*;
+            if bgra.len() != self.frame_len {
+                return Err("frame is the wrong size".into());
+            }
+            let ticks = |s: f64| (s * 10_000_000.0).round() as i64; // 100 ns units
+            unsafe {
+                let r = (|| -> windows::core::Result<()> {
+                    let buf = MFCreateMemoryBuffer(bgra.len() as u32)?;
+                    let mut dst = std::ptr::null_mut();
+                    buf.Lock(&mut dst, None, None)?;
+                    std::ptr::copy_nonoverlapping(bgra.as_ptr(), dst, bgra.len());
+                    buf.Unlock()?;
+                    buf.SetCurrentLength(bgra.len() as u32)?;
+                    let sample = MFCreateSample()?;
+                    sample.AddBuffer(&buf)?;
+                    sample.SetSampleTime(ticks(time))?;
+                    sample.SetSampleDuration(ticks(duration).max(1))?;
+                    self.writer.WriteSample(self.stream, &sample)
+                })();
+                r.map_err(|e| e.message())
+            }
+        }
+
+        /// Write out what's left and close the file.
+        pub fn finish(self) -> Result<(), String> {
+            let r = unsafe { self.writer.Finalize() }.map_err(|e| e.message());
+            drop(self.writer);
+            unsafe {
+                let _ = windows::Win32::Media::MediaFoundation::MFShutdown();
+            }
+            r
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -200,6 +293,21 @@ mod imp {
     pub fn capture_main_screen() -> Option<image::RgbaImage> {
         None
     }
+
+    /// Recording to video needs Windows' encoder for now.
+    pub struct VideoWriter;
+
+    impl VideoWriter {
+        pub fn create(_: &std::path::Path, _: u32, _: u32, _: u32) -> Result<Self, String> {
+            Err("Recording is only on Windows for now".into())
+        }
+        pub fn write(&mut self, _: &[u8], _: f64, _: f64) -> Result<(), String> {
+            Ok(())
+        }
+        pub fn finish(self) -> Result<(), String> {
+            Ok(())
+        }
+    }
 }
 
 pub use imp::*;
@@ -218,4 +326,61 @@ pub fn native_handle(frame: &eframe::Frame) -> Option<isize> {
 #[cfg(not(windows))]
 pub fn native_handle(_: &eframe::Frame) -> Option<isize> {
     None
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::VideoWriter;
+
+    /// Encode a short clip whose top half is red and bottom half blue, and (when ffmpeg
+    /// is around to decode it) check it comes back the right way up and the right colors.
+    #[test]
+    fn writes_an_mp4_the_right_way_up() {
+        let dir = std::env::temp_dir().join(format!("plexi-video-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mp4");
+        let (w, h) = (320u32, 240u32);
+        let mut frame = vec![0u8; (w * h * 4) as usize];
+        for (i, px) in frame.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let top = (i as u32 / w) < h / 2;
+            // Blue, green, red, unused.
+            px.copy_from_slice(if top { &[0, 0, 255, 255] } else { &[255, 0, 0, 255] });
+        }
+        // Windows Server (CI) can be missing Media Foundation entirely.
+        let mut v = match VideoWriter::create(&path, w, h, 30) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("no video encoder here ({e}); skipping");
+                return;
+            }
+        };
+        for i in 0..15 {
+            v.write(&frame, i as f64 / 30.0, 1.0 / 30.0).expect("a frame is written");
+        }
+        v.finish().expect("the file is closed");
+        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        assert!(len > 1000, "the video has something in it: {len} bytes");
+
+        let png = dir.join("frame.png");
+        let decoded = std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-i"])
+            .arg(&path)
+            .args(["-frames:v", "1"])
+            .arg(&png)
+            .status();
+        if !decoded.is_ok_and(|s| s.success()) {
+            eprintln!("no ffmpeg to decode with; only checked the file was written");
+            return;
+        }
+        let img = image::open(&png).unwrap().to_rgba8();
+        assert_eq!((img.width(), img.height()), (w, h));
+        let near = |p: &image::Rgba<u8>, rgb: [u8; 3]| p.0.iter().zip(rgb).all(|(a, b)| a.abs_diff(b) < 40);
+        assert!(near(img.get_pixel(w / 2, h / 4), [255, 0, 0]), "top is red: {:?}", img.get_pixel(w / 2, h / 4));
+        assert!(
+            near(img.get_pixel(w / 2, h * 3 / 4), [0, 0, 255]),
+            "bottom is blue: {:?}",
+            img.get_pixel(w / 2, h * 3 / 4)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

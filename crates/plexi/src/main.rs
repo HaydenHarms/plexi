@@ -11,6 +11,7 @@ mod fonts;
 mod handwriting;
 mod history;
 mod platform;
+mod record;
 #[cfg(test)]
 mod reel;
 mod shell;

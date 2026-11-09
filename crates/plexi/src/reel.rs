@@ -412,16 +412,16 @@ fn picture() -> Vec<u8> {
 }
 
 // Toolbar positions (points) in a 960-wide window.
-const PEN: (f32, f32) = (124.0, 34.0);
-const HIGHLIGHTER: (f32, f32) = (160.0, 34.0);
+const PEN: (f32, f32) = (106.0, 34.0);
+const HIGHLIGHTER: (f32, f32) = (142.0, 34.0);
 /// The select tools' button; its menu holds lasso, rectangle select and snapshot.
-const SELECT: (f32, f32) = (232.0, 34.0);
-const HAND: (f32, f32) = (268.0, 34.0);
-const TEXT: (f32, f32) = (304.0, 34.0);
-const SHAPE: (f32, f32) = (340.0, 34.0);
-const BLACK: (f32, f32) = (380.0, 34.0);
-const BLUE: (f32, f32) = (406.0, 34.0);
-const RED: (f32, f32) = (432.0, 34.0);
+const SELECT: (f32, f32) = (214.0, 34.0);
+const HAND: (f32, f32) = (250.0, 34.0);
+const TEXT: (f32, f32) = (286.0, 34.0);
+const SHAPE: (f32, f32) = (322.0, 34.0);
+const BLACK: (f32, f32) = (362.0, 34.0);
+const BLUE: (f32, f32) = (388.0, 34.0);
+const RED: (f32, f32) = (414.0, 34.0);
 
 #[test]
 #[ignore = "records docs/tour.gif; needs ffmpeg"]
@@ -625,6 +625,76 @@ fn preview_tools() {
     r.snapshot("snip");
     // Cancel rather than let the snip capture the real screen.
     r.button(PointerButton::Secondary, true);
+    r.finish();
+}
+
+#[test]
+#[ignore = "renders stills of recording, the on-screen toolbar, text corner handles and live handwriting"]
+fn preview_round_two() {
+    use crate::app::Tool;
+    let out = std::env::temp_dir().join("plexi-preview-two");
+    let mut r = Recorder::new(&out);
+    let ctx = r.ctx.clone();
+    r.wait(0.2);
+    r.snapshot("toolbar");
+    r.app.toggle_recording(&ctx);
+    r.wait(1.2);
+    r.snapshot("recording");
+    r.app.toggle_recording(&ctx);
+    r.app.toast = None;
+
+    // A text box, selected, then scaled up from its bottom-right corner.
+    r.app.tool = Tool::Text;
+    r.click((300.0, 260.0));
+    r.type_text("Scale me");
+    r.click((700.0, 520.0));
+    r.app.tool = Tool::Hand;
+    r.click((320.0, 262.0));
+    r.wait(0.2);
+    r.snapshot("text-corners");
+    let t = r
+        .app
+        .doc
+        .pages
+        .first()
+        .and_then(|p| {
+            p.elements.iter().find_map(|e| match e {
+                plexi_core::Element::Text(t) => Some(t.approx_bounds()),
+                _ => None,
+            })
+        })
+        .expect("the text box");
+    let c = r.app.view.to_screen(r.app.canvas_origin, t.max) + egui::vec2(4.0, 4.0);
+    r.move_to((c.x, c.y), 0.2);
+    r.button(PointerButton::Primary, true);
+    r.move_to((c.x + 160.0, c.y + 60.0), 0.4);
+    r.snapshot("text-scaling");
+    r.button(PointerButton::Primary, false);
+    r.wait(0.2);
+    r.snapshot("text-scaled");
+
+    // Handwriting: a stroke shows while it's being written.
+    r.app.handwriting.open = true;
+    r.wait(0.4);
+    let rect = r.app.handwriting.boxes[&'O'];
+    let cx = rect.center();
+    r.move_to((cx.x, rect.top() + 12.0), 0.1);
+    r.button(PointerButton::Primary, true);
+    for i in 0..=24 {
+        let a = -std::f32::consts::FRAC_PI_2 + i as f32 / 24.0 * 5.0;
+        r.move_to((cx.x + a.cos() * rect.width() * 0.3, cx.y + a.sin() * rect.height() * 0.32), 0.02);
+    }
+    r.snapshot("handwriting-live");
+    r.button(PointerButton::Primary, false);
+    r.wait(0.2);
+    r.snapshot("handwriting-done");
+    r.app.handwriting.open = false;
+
+    // On screen: the same menu, tools, shapes and redo as the notebook, and recording.
+    r.backdrop = Some(Arc::new(desktop()));
+    r.app.enter_overlay(&ctx, false);
+    r.wait(0.4);
+    r.snapshot("overlay-toolbar");
     r.finish();
 }
 

@@ -224,6 +224,7 @@ enum Job {
     Saved(PathBuf, Result<(), String>),
     Exported(Result<Vec<PathBuf>, String>),
     Printed(Result<PathBuf, String>),
+    Recorded(Result<PathBuf, String>),
     UpdateChecked { manual: bool, result: Result<Option<Release>, String> },
     UpdateProgress(f32),
     UpdateDownloaded(Result<PathBuf, String>),
@@ -296,6 +297,10 @@ pub struct PlexiApp {
     pub edit_guide: Option<(u64, egui::Rect)>,
     /// An area the snapshot tool picked, to copy to the clipboard this frame.
     pub snapshot_request: Option<(Target, plexi_core::Rect)>,
+    /// The recording in progress, if any.
+    pub recording: Option<crate::record::Recording>,
+    /// Plexi's window is currently left out of screen captures for the recording.
+    capture_excluded: bool,
     /// Bumped on every document change; caches keyed on it (sheet guides, export
     /// preview) know when to rebuild.
     pub revision: u64,
@@ -364,6 +369,8 @@ impl PlexiApp {
             canvas_origin: egui::Pos2::ZERO,
             edit_guide: None,
             snapshot_request: None,
+            recording: None,
+            capture_excluded: false,
             revision: 0,
             sheet_cache: None,
             shell: None,
@@ -682,6 +689,12 @@ impl PlexiApp {
                     self.toast("Opened in your PDF viewer — print from there (Ctrl+P)");
                 }
                 Job::Printed(Err(e)) => self.toast_error(format!("Couldn't make the PDF to print: {e}")),
+                Job::Recorded(Ok(path)) => {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    let dir = path.parent().and_then(|d| d.file_name()).unwrap_or_default().to_string_lossy();
+                    self.toast(format!("Saved {name} in {dir}"));
+                }
+                Job::Recorded(Err(e)) => self.toast_error(format!("Recording failed: {e}")),
                 Job::UpdateChecked { manual, result } => {
                     self.update = UpdateState::Idle;
                     match result {
@@ -1349,6 +1362,49 @@ impl PlexiApp {
         }
     }
 
+    // ----- recording -----------------------------------------------------------------
+
+    /// Start recording, or stop and save the recording in progress.
+    pub fn toggle_recording(&mut self, ctx: &Context) {
+        if let Some(r) = self.recording.take() {
+            drop(r.stop());
+            self.toast("Saving the recording…");
+            return;
+        }
+        if !cfg!(windows) {
+            self.toast_error("Recording is only on Windows for now");
+            return;
+        }
+        let tx = self.jobs_tx.clone();
+        let repaint = ctx.clone();
+        self.recording = Some(crate::record::Recording::start(crate::record::next_path(), move |r| {
+            let _ = tx.send(Job::Recorded(r));
+            repaint.request_repaint();
+        }));
+        let what = if self.is_overlay() { "the screen" } else { "the canvas" };
+        self.toast(format!("Recording {what} — Ctrl+Shift+R or the red button stops it"));
+    }
+
+    /// Feed the recording this frame, and keep Plexi's window out of screen captures
+    /// while it records the screen (so the monitor underneath can be captured clean).
+    fn record_frame(&mut self, ctx: &Context) {
+        let under = match (&self.mode, self.hwnd) {
+            (Mode::Overlay(o), Some(h)) if self.recording.is_some() => {
+                o.monitor.or_else(|| platform::window_monitor(h))
+            }
+            _ => None,
+        };
+        if let Some(h) = self.hwnd
+            && under.is_some() != self.capture_excluded
+        {
+            platform::exclude_from_capture(h, under.is_some());
+            self.capture_excluded = under.is_some();
+        }
+        if let Some(r) = &mut self.recording {
+            r.tick(ctx, under);
+        }
+    }
+
     // ----- overlay -------------------------------------------------------------------
 
     pub fn is_overlay(&self) -> bool {
@@ -1613,6 +1669,7 @@ impl PlexiApp {
                 Some(h) => {
                     let shot = o.monitor.or_else(|| platform::window_monitor(h)).and_then(platform::capture);
                     platform::exclude_from_capture(h, false);
+                    self.capture_excluded = false; // a recording puts it back next frame
                     shot
                 }
                 None => platform::capture_main_screen(),
@@ -1805,6 +1862,9 @@ impl PlexiApp {
             if hw { self.handwriting.redo() } else { self.redo() }
         } else if cmd(Key::Z) {
             if hw { self.handwriting.undo() } else { self.undo() }
+        }
+        if cmd_shift(Key::R) {
+            self.toggle_recording(ctx);
         }
         if cmd_shift(Key::S) {
             self.save_as();
@@ -2055,6 +2115,7 @@ impl eframe::App for PlexiApp {
             crate::ui::dialogs(self, &ctx);
         }
         self.shortcuts(&ctx);
+        self.record_frame(&ctx);
         self.autosave();
         self.update_title(&ctx);
         self.cache.end_frame();
@@ -2076,6 +2137,10 @@ impl eframe::App for PlexiApp {
             std::thread::sleep(Duration::from_millis(20));
         }
         self.flush_save();
+        if let Some(r) = self.recording.take() {
+            // Let the video file be finished properly.
+            let _ = r.stop().join();
+        }
         if self.path.is_some() {
             self.config.last_file = self.path.clone();
         }
@@ -2938,6 +3003,37 @@ mod tests {
         h.app.finish_text_edit();
         h.app.undo();
         assert_eq!(first_text(&h).size, big.size);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ctrl_shift_r_starts_and_stops_a_recording() {
+        let mut h = Harness::new();
+        let key = Event::Key {
+            key: Key::R,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND | Modifiers::SHIFT,
+        };
+        h.step(vec![key.clone()]);
+        assert!(h.app.recording.is_some(), "recording");
+        assert_eq!(h.app.tool, Tool::Pen, "not the rectangle shape (R)");
+        assert!(h.elements().is_empty());
+        h.step(vec![]);
+        h.step(vec![key]);
+        assert!(h.app.recording.is_none(), "stopped");
+        // No GPU in tests means no frames were read back, so there's nothing to save,
+        // and that's said rather than leaving an empty file.
+        for _ in 0..50 {
+            h.step(vec![]);
+            if h.app.toast.as_ref().is_some_and(|t| t.error) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let toast = h.app.toast.as_ref().expect("a toast");
+        assert!(toast.error && toast.text.contains("nothing was recorded"), "{}", toast.text);
     }
 
     #[test]

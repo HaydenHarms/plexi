@@ -21,6 +21,9 @@ screen into a sheet of glass you draw on. Written in Rust.
 - **Type in your own handwriting.** Write a sample of each letter with the pen in the
   handwriting window (from the font picker, the File menu, or <kbd>Ctrl</kbd>+<kbd>K</kbd>);
   Plexi builds a real font from it that renders the same way in every export.
+- **Record to video.** <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> records the canvas
+  as you work, or the whole screen while you draw on it, to an MP4 in your Videos folder
+  (Windows).
 - **Animated GIFs play right on the canvas**, cropping and all; exports show their first
   frame like a still picture.
 - **Almost no UI.** One floating toolbar. Everything else is a shortcut or
@@ -31,7 +34,8 @@ screen into a sheet of glass you draw on. Written in Rust.
 - **Exports to everything:** PDF (vector, multi-page), PNG, JPEG, WebP, BMP, TIFF, SVG,
   HTML, Markdown with images, plain text, Excalidraw, draw.io, InkML and JSON, with a live
   preview and your choice of paper size, orientation, margins and pixel size. Export or
-  print just some sheets (<kbd>Ctrl</kbd>+<kbd>P</kbd>, then e.g. `1, 3, 5-7`).
+  print just some sheets (<kbd>Ctrl</kbd>+<kbd>P</kbd>, then e.g. `1, 3, 5-7`), or just
+  the part you selected, wherever the sheet outlines are.
 
 <p align="center"><img src="docs/showcase.gif" width="720" alt="Plexi drawing over another app, lassoing and copying ink, playing an animated GIF on the page, and typing in a font made from your own handwriting"></p>
 
@@ -63,9 +67,10 @@ and draw-on-screen covers the main display.
 | Back to the notebook | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> (anywhere), <kbd>N</kbd> |
 | Snip an area → page + clipboard | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> (anywhere), or the scissors button |
 | Screenshot with ink → clipboard | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> while drawing on screen |
+| Record to video | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> or the record button: the canvas in the notebook, the whole screen while drawing on it; again to stop |
 | Pen, highlighter, eraser | <kbd>P</kbd> <kbd>H</kbd> <kbd>E</kbd>, or middle-drag / pen barrel button to erase |
 | Select (lasso), rectangle select, text | <kbd>S</kbd> <kbd>M</kbd> <kbd>T</kbd>; double-click text to edit it; font, size and style in the bar under the toolbar; <kbd>Shift</kbd>+click or drag adds or removes elements from the selection |
-| Hand | <kbd>G</kbd>; drag empty canvas to pan, drag an element to grab and move it, drag a handle to resize, click empty canvas to deselect |
+| Hand | <kbd>G</kbd>; drag empty canvas to pan, drag an element to grab and move it, drag a handle to resize, click empty canvas to deselect, <kbd>Shift</kbd>+click to select several |
 | Snapshot | pick it from the select tools button, then drag a box: that part of the page goes to the clipboard as a picture |
 | Copy, paste | <kbd>Ctrl</kbd>+<kbd>C</kbd> <kbd>Ctrl</kbd>+<kbd>V</kbd> |
 | Line, arrow, rectangle, ellipse | <kbd>L</kbd> <kbd>A</kbd> <kbd>R</kbd> <kbd>O</kbd> (hold <kbd>Shift</kbd> to snap) |
@@ -73,9 +78,9 @@ and draw-on-screen covers the main display.
 | Pan, zoom | <kbd>G</kbd>+drag, right-drag, <kbd>Space</kbd>+drag, <kbd>Shift</kbd>+scroll, two fingers · scroll wheel, pinch |
 | Pages | <kbd>Ctrl</kbd>+<kbd>Enter</kbd> new, <kbd>PgDn</kbd> / <kbd>PgUp</kbd>, trash button to delete (undoable) |
 | Images | paste or drop; drag a corner to resize freely (<kbd>Shift</kbd>: keep proportions) |
-| Text boxes | drag the handle on either side to set a wrap width (with the select, hand or text tool) |
+| Text boxes | drag a corner to scale the text, font size and all; drag the handle on either side to set a wrap width (with the select, hand or text tool) |
 | Crop or lock an image, arrange, paper color, sheet outlines and numbers | right-click |
-| Print | <kbd>Ctrl</kbd>+<kbd>P</kbd> (pick sheets, then **Print…** opens the PDF to print) |
+| Export, print | <kbd>Ctrl</kbd>+<kbd>E</kbd> or <kbd>Ctrl</kbd>+<kbd>P</kbd>: pick sheets, or with something selected just that part, then **Print…** opens the PDF to print |
 | Everything else | <kbd>Ctrl</kbd>+<kbd>K</kbd> command palette, <kbd>F1</kbd> shortcuts |
 
 Paste or drop images straight onto a page. The tray icon (left-click) toggles drawing on
