@@ -22,8 +22,9 @@ screen into a sheet of glass you draw on. Written in Rust.
   handwriting window (from the font picker, the File menu, or <kbd>Ctrl</kbd>+<kbd>K</kbd>);
   Plexi builds a real font from it that renders the same way in every export.
 - **Record to video.** <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> records the canvas
-  as you work, or the whole screen while you draw on it, to an MP4 in your Videos folder
-  (Windows).
+  as you work, or the whole screen while you draw on it, to an MP4 in your Downloads
+  folder (Windows). A trail behind the pointer shows where it is; its color, size and
+  length are in Settings.
 - **Animated GIFs play right on the canvas**, cropping and all; exports show their first
   frame like a still picture.
 - **Almost no UI.** One floating toolbar. Everything else is a shortcut or

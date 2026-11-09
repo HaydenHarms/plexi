@@ -157,13 +157,13 @@ fn fit_bgra(picture: &image::RgbaImage, size: [u32; 2], out: &mut Vec<u8>) {
     }
 }
 
-/// Where a new recording goes: the Videos folder, as "Plexi recording N.mp4" with the
-/// first N not taken.
+/// Where a new recording goes: the Downloads folder, as "Plexi recording N.mp4" with
+/// the first N not taken.
 pub fn next_path() -> PathBuf {
     let dirs = directories::UserDirs::new();
     let dir = dirs
         .as_ref()
-        .and_then(|d| d.video_dir().or(d.document_dir()).map(Path::to_path_buf))
+        .and_then(|d| d.download_dir().or(d.video_dir()).map(Path::to_path_buf))
         .unwrap_or_else(std::env::temp_dir);
     (1..)
         .map(|n| dir.join(format!("Plexi recording {n}.mp4")))
@@ -171,9 +171,69 @@ pub fn next_path() -> PathBuf {
         .unwrap_or_else(|| dir.join("Plexi recording.mp4"))
 }
 
+/// The mouse pointer's recent path, for the cursor trail painted while recording.
+#[derive(Default)]
+pub struct Trail {
+    /// (time in seconds, position in points), oldest first.
+    points: std::collections::VecDeque<(f64, egui::Pos2)>,
+}
+
+impl Trail {
+    /// Add where the pointer is at `now`, and forget points older than `length` seconds.
+    pub fn push(&mut self, now: f64, pos: egui::Pos2, length: f32) {
+        if self.points.back().is_none_or(|(_, p)| p.distance(pos) > 0.5) {
+            self.points.push_back((now, pos));
+        } else if let Some(last) = self.points.back_mut() {
+            last.0 = now; // still: the dot stays, the streak drains away
+        }
+        while self.points.front().is_some_and(|(t, _)| now - t > length as f64) && self.points.len() > 1 {
+            self.points.pop_front();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.points.clear();
+    }
+
+    /// The streak, thinning and fading toward its tail, with a dot on the pointer.
+    pub fn paint(&self, painter: &egui::Painter, now: f64, color: egui::Color32, size: f32, length: f32) {
+        let Some(&(_, head)) = self.points.back() else { return };
+        let fade = |t: f64| (1.0 - ((now - t) / length.max(0.01) as f64) as f32).clamp(0.0, 1.0);
+        let pts: Vec<_> = self.points.iter().collect();
+        for w in pts.windows(2) {
+            let (f0, f1) = (fade(w[0].0), fade(w[1].0));
+            let f = (f0 + f1) / 2.0;
+            if f <= 0.0 {
+                continue;
+            }
+            let c = color.gamma_multiply(f * 0.8);
+            painter.line_segment([w[0].1, w[1].1], egui::Stroke::new(size * (0.25 + 0.6 * f), c));
+            painter.circle_filled(w[1].1, size * (0.125 + 0.3 * f1), c);
+        }
+        painter.circle_filled(head, size / 2.0, color);
+        painter.circle_stroke(head, size / 2.0, egui::Stroke::new(1.5, egui::Color32::from_white_alpha(200)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_trail_keeps_only_its_recent_path() {
+        let mut t = Trail::default();
+        for i in 0..20 {
+            t.push(i as f64 * 0.05, egui::pos2(i as f32 * 10.0, 0.0), 0.3);
+        }
+        // 0.3 s at 0.05 s apart: about 7 points left, the newest last.
+        assert!((6..=8).contains(&t.points.len()), "{}", t.points.len());
+        assert_eq!(t.points.back().unwrap().1.x, 190.0);
+        // Holding still drains the streak down to just the dot.
+        for i in 0..20 {
+            t.push(1.0 + i as f64 * 0.05, egui::pos2(190.0, 0.0), 0.3);
+        }
+        assert_eq!(t.points.len(), 1);
+    }
 
     /// Run a recording the way the app does, answering each frame's screenshot request
     /// with a picture of our own (there's no GPU in tests), and check a real video comes

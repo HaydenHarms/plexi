@@ -87,6 +87,14 @@ pub struct Config {
     pub text_underline: bool,
     /// Keep overlay ink when leaving overlay mode.
     pub keep_overlay_ink: bool,
+    /// While recording, paint a dot with a fading streak behind the mouse pointer, so
+    /// it shows in the video (screen captures leave the real pointer out).
+    pub cursor_trail: bool,
+    pub cursor_trail_color: Color,
+    /// Diameter of the dot, in points.
+    pub cursor_trail_size: f32,
+    /// How long the streak lasts behind the pointer, in seconds.
+    pub cursor_trail_length: f32,
     pub autosave: bool,
     /// Look for a newer release on GitHub when Plexi starts.
     pub check_updates: bool,
@@ -138,6 +146,10 @@ impl Default for Config {
             text_italic: false,
             text_underline: false,
             keep_overlay_ink: true,
+            cursor_trail: true,
+            cursor_trail_color: Color::rgba(0xff, 0xb0, 0x20, 210),
+            cursor_trail_size: 18.0,
+            cursor_trail_length: 0.35,
             autosave: true,
             check_updates: true,
             skipped_version: None,

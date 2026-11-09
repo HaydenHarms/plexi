@@ -629,6 +629,30 @@ fn preview_tools() {
 }
 
 #[test]
+#[ignore = "renders stills of the cursor trail while recording, and its settings"]
+fn preview_trail() {
+    let out = std::env::temp_dir().join("plexi-preview-trail");
+    let mut r = Recorder::new(&out);
+    let ctx = r.ctx.clone();
+    r.wait(0.2);
+    r.app.toggle_recording(&ctx);
+    r.app.toast = None;
+    r.move_to((200.0, 400.0), 0.1);
+    for (x, y) in curve(&[(200.0, 400.0), (380.0, 250.0), (560.0, 330.0), (700.0, 220.0)], 10) {
+        r.move_to((x, y), 0.012);
+    }
+    r.snapshot("trail-moving");
+    r.wait(0.6);
+    r.snapshot("trail-still");
+    r.app.toggle_recording(&ctx);
+    r.app.toast = None;
+    r.app.settings_open = true;
+    r.wait(0.3);
+    r.snapshot("settings");
+    r.finish();
+}
+
+#[test]
 #[ignore = "renders stills of recording, the on-screen toolbar, text corner handles and live handwriting"]
 fn preview_round_two() {
     use crate::app::Tool;

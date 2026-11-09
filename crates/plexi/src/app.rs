@@ -305,6 +305,8 @@ pub struct PlexiApp {
     pub recording: Option<crate::record::Recording>,
     /// Plexi's window is currently left out of screen captures for the recording.
     capture_excluded: bool,
+    /// The pointer's recent path, painted as a trail while recording.
+    pub cursor_trail: crate::record::Trail,
     /// Bumped on every document change; caches keyed on it (sheet guides, export
     /// preview) know when to rebuild.
     pub revision: u64,
@@ -376,6 +378,7 @@ impl PlexiApp {
             snapshot_request: None,
             recording: None,
             capture_excluded: false,
+            cursor_trail: Default::default(),
             revision: 0,
             sheet_cache: None,
             shell: None,
@@ -695,6 +698,7 @@ impl PlexiApp {
                 }
                 Job::Printed(Err(e)) => self.toast_error(format!("Couldn't make the PDF to print: {e}")),
                 Job::Recorded(Ok(path)) => {
+                    self.cursor_trail.clear();
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     let dir = path.parent().and_then(|d| d.file_name()).unwrap_or_default().to_string_lossy();
                     self.toast(format!("Saved {name} in {dir}"));
@@ -1421,9 +1425,34 @@ impl PlexiApp {
             platform::exclude_from_capture(h, under.is_some());
             self.capture_excluded = under.is_some();
         }
+        self.paint_cursor_trail(ctx);
         if let Some(r) = &mut self.recording {
             r.tick(ctx, under);
         }
+    }
+
+    /// While recording, a dot with a fading streak behind the mouse pointer, painted on
+    /// top of everything so it's in the video. The pointer position comes from the
+    /// system where it can, since in click-through the window gets no mouse input.
+    fn paint_cursor_trail(&mut self, ctx: &Context) {
+        if self.recording.is_none() || !self.config.cursor_trail {
+            self.cursor_trail.clear();
+            return;
+        }
+        let ppp = ctx.pixels_per_point();
+        let pos = self
+            .hwnd
+            .and_then(platform::cursor_in_window)
+            .map(|[x, y]| egui::pos2(x / ppp, y / ppp))
+            .or_else(|| ctx.input(|i| i.pointer.latest_pos()));
+        let now = ctx.input(|i| i.time);
+        let c = &self.config;
+        if let Some(pos) = pos {
+            self.cursor_trail.push(now, pos, c.cursor_trail_length);
+        }
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("cursor-trail")));
+        let color = crate::canvas::color32(c.cursor_trail_color);
+        self.cursor_trail.paint(&painter, now, color, c.cursor_trail_size, c.cursor_trail_length);
     }
 
     // ----- overlay -------------------------------------------------------------------

@@ -1861,56 +1861,86 @@ fn context_menu(app: &mut PlexiApp, ctx: &Context) {
 fn settings_window(app: &mut PlexiApp, ctx: &Context) {
     let mut open = app.settings_open;
     let mut check_now = false;
-    egui::Window::new("Settings").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-        let c = &mut app.config;
-        ui.heading("Ink");
-        ui.add(egui::Slider::new(&mut c.smoothing, 0.0..=1.0).text("Pen smoothing"));
-        ui.weak("0 is raw input. Smoothing only steadies slow movement; fast writing stays sharp.");
-        ui.add(egui::Slider::new(&mut c.pen_width, 0.5..=40.0).logarithmic(true).text("Pen width"));
-        ui.add(egui::Slider::new(&mut c.highlighter_width, 4.0..=80.0).logarithmic(true).text("Highlighter width"));
-        ui.add(egui::Slider::new(&mut c.eraser_size, 4.0..=120.0).logarithmic(true).text("Eraser size"));
-        ui.checkbox(&mut c.eraser_partial, "Eraser removes only the part it touches");
-        ui.separator();
-        ui.heading("Draw on screen");
-        ui.checkbox(&mut c.keep_overlay_ink, "Keep screen ink when going back to the notebook");
-        egui::Grid::new("hotkeys").num_columns(2).show(ui, |ui| {
-            ui.label("Draw / click-through");
-            ui.text_edit_singleline(&mut c.hotkey_draw);
-            ui.end_row();
-            ui.label("Clear screen ink");
-            ui.text_edit_singleline(&mut c.hotkey_clear);
-            ui.end_row();
-            ui.label("Back to notebook");
-            ui.text_edit_singleline(&mut c.hotkey_notebook);
-            ui.end_row();
-            ui.label("Snip an area");
-            ui.text_edit_singleline(&mut c.hotkey_snip);
-            ui.end_row();
-        });
-        ui.weak("Hotkey changes apply the next time Plexi starts.");
-        ui.separator();
-        ui.heading("Files");
-        ui.checkbox(&mut c.autosave, "Save automatically");
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut c.check_updates, "Check for updates when Plexi starts");
-            if ui.button("Check now").clicked() {
-                check_now = true;
-            }
-        });
-        let dir = crate::config::data_dir();
-        ui.horizontal(|ui| {
-            ui.label(if crate::config::is_portable() {
-                "Portable mode — data beside the exe"
-            } else {
-                "Data folder"
+    let max_h = (ctx.content_rect().height() - 140.0).max(200.0);
+    egui::Window::new("Settings")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_pos(ctx.content_rect().left_top() + vec2(24.0, 70.0))
+        .max_height(max_h)
+        .vscroll(true)
+        .show(ctx, |ui| {
+            let c = &mut app.config;
+            ui.heading("Ink");
+            ui.add(egui::Slider::new(&mut c.smoothing, 0.0..=1.0).text("Pen smoothing"));
+            ui.weak("0 is raw input. Smoothing only steadies slow movement; fast writing stays sharp.");
+            ui.add(egui::Slider::new(&mut c.pen_width, 0.5..=40.0).logarithmic(true).text("Pen width"));
+            ui.add(egui::Slider::new(&mut c.highlighter_width, 4.0..=80.0).logarithmic(true).text("Highlighter width"));
+            ui.add(egui::Slider::new(&mut c.eraser_size, 4.0..=120.0).logarithmic(true).text("Eraser size"));
+            ui.checkbox(&mut c.eraser_partial, "Eraser removes only the part it touches");
+            ui.separator();
+            ui.heading("Draw on screen");
+            ui.checkbox(&mut c.keep_overlay_ink, "Keep screen ink when going back to the notebook");
+            egui::Grid::new("hotkeys").num_columns(2).show(ui, |ui| {
+                ui.label("Draw / click-through");
+                ui.text_edit_singleline(&mut c.hotkey_draw);
+                ui.end_row();
+                ui.label("Clear screen ink");
+                ui.text_edit_singleline(&mut c.hotkey_clear);
+                ui.end_row();
+                ui.label("Back to notebook");
+                ui.text_edit_singleline(&mut c.hotkey_notebook);
+                ui.end_row();
+                ui.label("Snip an area");
+                ui.text_edit_singleline(&mut c.hotkey_snip);
+                ui.end_row();
             });
-            if ui.button("Open").clicked() {
-                let _ =
-                    std::process::Command::new(if cfg!(windows) { "explorer" } else { "xdg-open" }).arg(&dir).spawn();
-            }
+            ui.weak("Hotkey changes apply the next time Plexi starts.");
+            ui.separator();
+            ui.heading("Recording");
+            ui.checkbox(&mut c.cursor_trail, "Show a cursor trail in recordings");
+            ui.add_enabled_ui(c.cursor_trail, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Color");
+                    let mut rgba = crate::canvas::color32(c.cursor_trail_color);
+                    if ui.color_edit_button_srgba(&mut rgba).changed() {
+                        let [r, g, b, a] = rgba.to_srgba_unmultiplied();
+                        c.cursor_trail_color = plexi_core::Color::rgba(r, g, b, a);
+                    }
+                });
+                ui.add(egui::Slider::new(&mut c.cursor_trail_size, 6.0..=48.0).text("Dot size"));
+                ui.add(
+                    egui::Slider::new(&mut c.cursor_trail_length, 0.0..=1.5)
+                        .step_by(0.05)
+                        .suffix(" s")
+                        .text("Trail length"),
+                );
+            });
+            ui.weak("Recordings are saved in your Downloads folder.");
+            ui.separator();
+            ui.heading("Files");
+            ui.checkbox(&mut c.autosave, "Save automatically");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut c.check_updates, "Check for updates when Plexi starts");
+                if ui.button("Check now").clicked() {
+                    check_now = true;
+                }
+            });
+            let dir = crate::config::data_dir();
+            ui.horizontal(|ui| {
+                ui.label(if crate::config::is_portable() {
+                    "Portable mode — data beside the exe"
+                } else {
+                    "Data folder"
+                });
+                if ui.button("Open").clicked() {
+                    let _ = std::process::Command::new(if cfg!(windows) { "explorer" } else { "xdg-open" })
+                        .arg(&dir)
+                        .spawn();
+                }
+            });
+            ui.weak(format!("Plexi {}", env!("CARGO_PKG_VERSION")));
         });
-        ui.weak(format!("Plexi {}", env!("CARGO_PKG_VERSION")));
-    });
     if check_now {
         app.check_for_updates(ctx, true);
     }

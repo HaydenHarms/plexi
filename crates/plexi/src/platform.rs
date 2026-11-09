@@ -139,6 +139,17 @@ mod imp {
         }
     }
 
+    /// Where the mouse pointer is, in physical pixels from the top-left of the window's
+    /// client area (it may be outside it). Works when the window gets no mouse input,
+    /// like the overlay in click-through.
+    pub fn cursor_in_window(h: isize) -> Option<[f32; 2]> {
+        let mut p = POINT::default();
+        unsafe { GetCursorPos(&mut p) }.ok()?;
+        unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd(h), &mut p) }
+            .as_bool()
+            .then_some([p.x as f32, p.y as f32])
+    }
+
     /// A number that changes whenever anything is copied to the system clipboard, by any
     /// app.
     pub fn clipboard_sequence() -> Option<u32> {
@@ -285,6 +296,9 @@ mod imp {
     }
     pub fn show_in_taskbar(_: isize, _: bool) {}
     pub fn attach_parent_console() {}
+    pub fn cursor_in_window(_: isize) -> Option<[f32; 2]> {
+        None
+    }
     /// Unknown here: Plexi's own copy is then always the one pasted.
     pub fn clipboard_sequence() -> Option<u32> {
         None
