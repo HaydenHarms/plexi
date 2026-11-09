@@ -1,6 +1,1 @@
-- [x] Rework selected area printing, allow just for a button in the export menu that says select area and then allow the selection to happen from there with a rectangle selector.
-- [x] For all menus make the hitbox for the x bigger
-- [x] The lasso tool needs to select the things within its borders even if it doesn't surround the whole object
-- [x] Allow the snapshot tool to be used as the selected print area if a snapshot is just captured, not the rectangle select
-- [x] Snapshot tool should work on the "draw on screen mode." Currently it captures blank canvas and doesn't show anything of the actual screen
-- [x] For selection tools, allow edge pushing so that you can drag it and move the screen to include things that would otherwise be off screens
+- [ ] Let's add drag placement of selected areas on the print preview
