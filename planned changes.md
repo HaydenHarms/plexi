@@ -16,3 +16,5 @@
 - [ ] Strokes on my handwriting don't show up until you lift off the page, make it write as you write.
 - [ ] In my handwriting, the strokes are all straight-lined, no curves. I want curves
 - [ ] Holding shift still doesn't let me select multiple things
+- [ ] We don't need a print and export button, just export
+- [ ] Allow selection printing instead of page selection so that you can print a section not bounded by a page
