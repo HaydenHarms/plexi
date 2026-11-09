@@ -1,3 +1,4 @@
 - [ ] Let's add drag placement of selected areas on the print preview
 - [ ] Allow for multiple, named handwriting fonts
 - [ ] Allow font file format exporting
+- [ ] Allow dynamic scaling with text boxes as well, right now it's only proportional
