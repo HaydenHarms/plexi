@@ -4,3 +4,4 @@
 - [ ] Allow dynamic scaling with text boxes as well, right now it's only proportional
 - [ ] We need a grouping function in the right click menu
 - [ ] Allow resizing of shapes, I thought that would have been intuitive in the first place
+- [ ] Add rotation of shapes, text, images, etc.
