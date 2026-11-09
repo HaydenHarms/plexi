@@ -33,6 +33,8 @@ screen into a sheet of glass you draw on. Written in Rust.
   preview and your choice of paper size, orientation, margins and pixel size. Export or
   print just some sheets (<kbd>Ctrl</kbd>+<kbd>P</kbd>, then e.g. `1, 3, 5-7`).
 
+<p align="center"><img src="docs/showcase.gif" width="720" alt="Plexi drawing over another app, lassoing and copying ink, playing an animated GIF on the page, and typing in a font made from your own handwriting"></p>
+
 <p align="center"><img src="docs/tour.gif" width="720" alt="A tour of Plexi: handwriting, images, zooming the endless page, paper colors and export"></p>
 
 ## Download

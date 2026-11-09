@@ -148,13 +148,24 @@ fn disc_polygon(c: [f32; 2], r: f32) -> Vec<[f32; 2]> {
 
 /// Every piece of every stroke of a glyph, as closed polygons in box-normalized
 /// coordinates, all consistently wound.
+///
+/// The pen shape is worked out in font units, not box units: [`crate::ink::radius`] has
+/// a floor meant for page units (0.3), which in box units would make every line at
+/// least 30% of the box wide.
 fn glyph_polygons(strokes: &[Stroke]) -> Vec<Vec<[f32; 2]>> {
+    let down = |p: [f32; 2]| [p[0] / SPAN, p[1] / SPAN];
     let mut out = Vec::new();
     for stroke in strokes {
-        for piece in pen_pieces(stroke) {
+        let mut big = stroke.clone();
+        big.width *= SPAN;
+        for pt in &mut big.points {
+            pt.x *= SPAN;
+            pt.y *= SPAN;
+        }
+        for piece in pen_pieces(&big) {
             match piece {
-                PenPiece::Disc { c, r } if r > 1e-5 => out.push(disc_polygon(c, r)),
-                PenPiece::Hull(q) => out.push(q.to_vec()),
+                PenPiece::Disc { c, r } if r > 1e-5 => out.push(disc_polygon(down(c), r / SPAN)),
+                PenPiece::Hull(q) => out.push(q.map(down).to_vec()),
                 _ => {}
             }
         }
@@ -397,6 +408,9 @@ mod tests {
         let bbox = face.outline_glyph(gid, &mut sink).expect("the glyph has an outline");
         assert!(sink.0 > 0, "at least one contour");
         assert!(bbox.width() > 0 && bbox.height() > 0, "the outline covers real area");
+        // A flat stroke is only as tall as the pen is wide (0.06 of the box, 60 units),
+        // not a blob.
+        assert!(bbox.height() < 100, "outline is {} units tall", bbox.height());
 
         // An unwritten character has no glyph at all, so renderers fall back.
         assert!(face.glyph_index('Q').is_none());

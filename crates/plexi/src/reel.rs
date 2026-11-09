@@ -817,38 +817,27 @@ fn star(cx: f32, cy: f32, r: f32) -> Vec<(f32, f32)> {
     out
 }
 
-/// Pen strokes for a few letters, in the handwriting window's box units (`y` 0 at the
-/// top, baseline at 0.8, x-height at 0.3).
+/// Pen strokes for a few capitals, in the handwriting window's box units (`y` 0 at the
+/// top, baseline at 0.8), a little wobbly like real handwriting.
 fn glyph(c: char) -> Vec<Vec<(f32, f32)>> {
+    let oval = (0..=16)
+        .map(|i| {
+            let a = -1.9 + i as f32 / 16.0 * 6.6;
+            (0.37 + a.cos() * 0.24, 0.46 + a.sin() * 0.34)
+        })
+        .collect();
     match c {
-        'h' => vec![
-            vec![(0.17, 0.07), (0.16, 0.45), (0.17, 0.8)],
-            vec![(0.17, 0.52), (0.27, 0.35), (0.42, 0.31), (0.53, 0.42), (0.54, 0.62), (0.55, 0.8)],
+        'H' => vec![
+            vec![(0.15, 0.12), (0.16, 0.45), (0.15, 0.8)],
+            vec![(0.55, 0.1), (0.54, 0.47), (0.56, 0.8)],
+            vec![(0.14, 0.47), (0.35, 0.45), (0.56, 0.46)],
         ],
-        'e' => vec![vec![
-            (0.14, 0.58),
-            (0.36, 0.58),
-            (0.55, 0.53),
-            (0.5, 0.36),
-            (0.33, 0.3),
-            (0.16, 0.42),
-            (0.13, 0.62),
-            (0.25, 0.78),
-            (0.42, 0.8),
-            (0.57, 0.72),
-        ]],
-        'l' => vec![vec![(0.28, 0.06), (0.26, 0.4), (0.27, 0.7), (0.34, 0.8), (0.46, 0.76)]],
-        'o' => vec![vec![
-            (0.4, 0.31),
-            (0.2, 0.37),
-            (0.13, 0.58),
-            (0.24, 0.78),
-            (0.43, 0.79),
-            (0.56, 0.6),
-            (0.51, 0.38),
-            (0.36, 0.3),
-            (0.3, 0.34),
-        ]],
+        'E' => vec![
+            vec![(0.52, 0.11), (0.3, 0.1), (0.16, 0.12), (0.15, 0.46), (0.16, 0.79), (0.35, 0.8), (0.54, 0.78)],
+            vec![(0.16, 0.45), (0.32, 0.46), (0.46, 0.44)],
+        ],
+        'L' => vec![vec![(0.17, 0.1), (0.16, 0.45), (0.17, 0.8), (0.35, 0.79), (0.52, 0.8)]],
+        'O' => vec![oval],
         _ => vec![],
     }
 }
@@ -895,7 +884,11 @@ fn record_showcase() {
     r.click(BLUE);
     r.drag(PointerButton::Primary, &star(680.0, 210.0, 62.0), 2);
     r.say("Ink stays editable: lasso it, move it, copy it");
+    // Open the select tools menu, then pick the lasso from it.
     r.click(SELECT);
+    r.wait(0.4);
+    r.app.tool = Tool::Lasso;
+    r.click((600.0, 470.0)); // closes the menu without drawing
     r.drag(PointerButton::Primary, &hand_loop(680.0, 215.0, 95.0, 88.0), 2);
     r.wait(0.3);
     let path: Vec<(f32, f32)> = curve(&[(680.0, 215.0), (520.0, 330.0), (300.0, 420.0)], 30);
@@ -932,7 +925,7 @@ fn record_showcase() {
     r.say("Write each letter once...");
     r.app.handwriting.open = true;
     r.wait(0.5);
-    for ch in ['h', 'e', 'l', 'o'] {
+    for ch in ['H', 'E', 'L', 'O'] {
         let rect = r.app.handwriting.boxes[&ch];
         for stroke in glyph(ch) {
             let pts: Vec<(f32, f32)> = curve(&stroke, 6)
@@ -955,7 +948,7 @@ fn record_showcase() {
         t.font = Some(plexi_core::handwriting::FAMILY_NAME.into());
         t.size = 64.0;
     });
-    r.type_text("hello hello");
+    r.type_text("HELLO HELLO");
     r.wait(2.0);
     r.snapshot("typed");
     r.finish();
