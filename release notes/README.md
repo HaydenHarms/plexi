@@ -2,6 +2,7 @@
 
 One file per release, named after its tag (`v0.5.0.md`). When a `vX.Y.Z` tag is pushed, the release workflow puts that file at the top of the GitHub release, above the download list. Write the file for the next version before tagging.
 
+- [0.8.0](v0.8.0.md): rotating, resizing shapes, groups, background removal, named handwriting fonts and .ttf export
 - [0.7.0](v0.7.0.md): recording to video, scaling text from its corners, printing a picked area, snapshots of the screen
 - [0.6.0](v0.6.0.md): snapshot tool, select tools menu, hand cursor, text box handles, handwriting font fix
 - [0.5.0](v0.5.0.md): handwriting font, animated GIFs, rectangle select, hand tool, copy and paste
