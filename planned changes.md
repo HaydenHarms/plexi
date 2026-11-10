@@ -1,2 +1,3 @@
 - [ ] Make rotating happen when your cursor is just outside of the scaling boxes on the corners, i dont like the obtrusiveness of the rotating circle coming out
 - [ ] Allow scaling variety for selected area printing, allowing you to stretch a selected area over multiple pages if it is a lot
+- [ ] Allow locking for all objects, especially allow it when multiple items are selected
