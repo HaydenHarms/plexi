@@ -347,7 +347,15 @@ fn load_asset_texture(ctx: &egui::Context, asset: &str, bytes: Option<&[u8]>) ->
             .collect();
         return AssetTexture::Animated { frames: handles, delays_ms, total_ms };
     }
-    let decoded = bytes.and_then(|b| image::load_from_memory(b).ok()).map(|i| i.to_rgba8());
+    // Shrink anything bigger than the graphics card takes (a big photo, a PDF page).
+    let max = ctx.input(|i| i.max_texture_side).max(64) as u32;
+    let decoded = bytes.and_then(|b| image::load_from_memory(b).ok()).map(|i| {
+        if i.width().max(i.height()) > max {
+            i.resize(max, max, image::imageops::FilterType::Triangle).to_rgba8()
+        } else {
+            i.to_rgba8()
+        }
+    });
     let ci = match decoded {
         Some(i) => egui::ColorImage::from_rgba_unmultiplied([i.width() as usize, i.height() as usize], i.as_raw()),
         None => egui::ColorImage::new([1, 1], vec![Color32::from_gray(200)]),

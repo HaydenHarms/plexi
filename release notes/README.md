@@ -2,6 +2,7 @@
 
 One file per release, named after its tag (`v0.5.0.md`). When a `vX.Y.Z` tag is pushed, the release workflow puts that file at the top of the GitHub release, above the download list. Write the file for the next version before tagging.
 
+- [0.8.2](v0.8.2.md): dropping PDFs onto the canvas
 - [0.8.1](v0.8.1.md): locking anything, printing an area across several sheets, turning from the corners
 - [0.8.0](v0.8.0.md): rotating, resizing shapes, groups, background removal, named handwriting fonts and .ttf export
 - [0.7.0](v0.7.0.md): recording to video, scaling text from its corners, printing a picked area, snapshots of the screen

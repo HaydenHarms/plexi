@@ -12,6 +12,7 @@ pub mod gif;
 pub mod handwriting;
 pub mod ink;
 pub mod model;
+pub mod pdf_import;
 
 pub use geom::Rect;
 pub use model::*;

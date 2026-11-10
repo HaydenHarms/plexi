@@ -11,6 +11,7 @@ use egui::{Context, Key, Modifiers, ViewportCommand};
 use plexi_core::Shape;
 use plexi_core::export::layout::{self, Area, Layout, RegionSize};
 use plexi_core::export::{ExportFormat, RenderOptions};
+use plexi_core::pdf_import::PdfPage;
 use plexi_core::{Color, Document, Element, ImageEl, InkKind, Page, ShapeKind, TextBox, format, new_id};
 
 use crate::canvas::{AssetTexture, CropState, Interaction, MeshCache, View};
@@ -250,10 +251,25 @@ enum Job {
     Exported(Result<Vec<PathBuf>, String>),
     Printed(Result<PathBuf, String>),
     Recorded(Result<PathBuf, String>),
-    UpdateChecked { manual: bool, result: Result<Option<Release>, String> },
+    UpdateChecked {
+        manual: bool,
+        result: Result<Option<Release>, String>,
+    },
     UpdateProgress(f32),
     UpdateDownloaded(Result<PathBuf, String>),
+    /// A dropped PDF's pages, drawn, to put on `target` at `at` (see
+    /// [`PlexiApp::place_pdf_pages`]), and how many pages it has in all.
+    PdfPages {
+        target: Target,
+        at: Option<[f32; 2]>,
+        result: Result<(Vec<PdfPage>, usize), String>,
+    },
 }
+
+/// The most pages of a dropped PDF put on the canvas.
+const MAX_PDF_PAGES: usize = 60;
+/// Space between the pages of a dropped PDF, in page units.
+const PDF_PAGE_GAP: f32 = 24.0;
 
 /// Where the update check and install stand.
 #[derive(Clone, Debug, Default)]
@@ -730,6 +746,10 @@ impl PlexiApp {
                     self.toast(format!("Exported {first}{more}"));
                 }
                 Job::Exported(Err(e)) => self.toast_error(format!("Export failed: {e}")),
+                Job::PdfPages { target, at, result } => match result {
+                    Ok((pages, total)) => self.place_pdf_pages(target, at, pages, total),
+                    Err(e) => self.toast_error(e),
+                },
                 Job::Printed(Ok(path)) => {
                     open_url(&path.to_string_lossy());
                     self.toast("Opened in your PDF viewer — print from there (Ctrl+P)");
@@ -1035,6 +1055,58 @@ impl PlexiApp {
         self.tool = Tool::Lasso;
     }
 
+    /// Put the pages of a PDF on the canvas as pictures: drawn on a worker (big files
+    /// take a moment), then placed by [`Self::place_pdf_pages`].
+    pub fn insert_pdf(&mut self, bytes: Vec<u8>, at: Option<[f32; 2]>, name: &str, ctx: &Context) {
+        let at = Some(at.unwrap_or_else(|| self.view_center(ctx)));
+        let target = self.target();
+        self.toast(format!("Opening {name}…"));
+        let (tx, ctx) = (self.jobs_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let result = plexi_core::pdf_import::pages(bytes, MAX_PDF_PAGES);
+            let _ = tx.send(Job::PdfPages { target, at, result });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Place a PDF's drawn pages on `t`, one under the other, centered across `at` with
+    /// the first page's top there, at the size they print (shrunk to fit the screen on
+    /// the screen layer), and select them.
+    pub fn place_pdf_pages(&mut self, t: Target, at: Option<[f32; 2]>, pages: Vec<PdfPage>, total: usize) {
+        if pages.is_empty() || (t == Target::Overlay && !self.is_overlay()) {
+            return;
+        }
+        let shrink = match t {
+            Target::Overlay => {
+                let [w, h] = self.doc.overlay.size.dims().unwrap_or([1920.0, 1080.0]);
+                let widest = pages.iter().map(|p| p.size[0]).fold(1.0, f32::max);
+                let tallest = pages.iter().map(|p| p.size[1]).fold(1.0, f32::max);
+                (w * 0.8 / widest).min(h * 0.8 / tallest).min(1.0)
+            }
+            Target::Page(_) => 1.0,
+        };
+        let [cx, mut y] = at.unwrap_or([0.0, 0.0]);
+        self.checkpoint(t);
+        let mut ids = HashSet::new();
+        let n = pages.len();
+        for p in pages {
+            let size = [p.size[0] * shrink, p.size[1] * shrink];
+            let asset = self.doc.add_asset(p.png);
+            let img = ImageEl::new(asset, [cx - size[0] / 2.0, y], size);
+            y += size[1] + PDF_PAGE_GAP * shrink;
+            ids.insert(img.id);
+            self.page_mut(t).elements.push(Element::Image(img));
+        }
+        self.selection = ids;
+        self.tool = Tool::Lasso;
+        self.touch();
+        match (n, total) {
+            (1, 1) => self.toast("Added the PDF's page"),
+            (n, total) if n == total => self.toast(format!("Added the PDF's {n} pages")),
+            (n, total) => self.toast(format!("Added the first {n} of the PDF's {total} pages")),
+        }
+    }
+
     pub fn insert_text(&mut self, text: String, ctx: &Context) {
         let c = self.view_center(ctx);
         let t = self.target();
@@ -1134,7 +1206,12 @@ impl PlexiApp {
             }
             if let Ok(bytes) = std::fs::read(&path) {
                 let at = ctx.input(|i| i.pointer.hover_pos()).map(|p| self.screen_to_target(ctx, p));
-                self.insert_image(bytes, at, ctx);
+                if ext == "pdf" || plexi_core::pdf_import::is_pdf(&bytes) {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    self.insert_pdf(bytes, at, &name, ctx);
+                } else {
+                    self.insert_image(bytes, at, ctx);
+                }
             }
         }
         if self.editing_text.is_some() || ctx.egui_wants_keyboard_input() {
@@ -3571,6 +3648,62 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_pdf_lands_as_pictures_of_its_pages() {
+        let mut h = Harness::new();
+        let mut page = plexi_core::Page::new("p", plexi_core::PageSize::Letter);
+        page.elements.push(Element::Shape(plexi_core::Shape::new(
+            ShapeKind::Rect,
+            [100.0, 100.0],
+            [300.0, 200.0],
+            plexi_core::Color::rgb(0, 0, 200),
+            8.0,
+        )));
+        let opts = plexi_core::export::RenderOptions::default();
+        let pdf = plexi_core::export::pdf::pages_pdf("t", &[&page, &page], &Default::default(), &opts).unwrap();
+        let ctx = h.ctx.clone();
+        h.app.insert_pdf(pdf, Some([500.0, 100.0]), "notes.pdf", &ctx);
+        for _ in 0..600 {
+            if !h.elements().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.step(vec![]);
+        }
+        let imgs: Vec<ImageEl> = h
+            .elements()
+            .iter()
+            .filter_map(|e| match e {
+                Element::Image(i) => Some(i.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(imgs.len(), 2, "one picture per page");
+        assert!(imgs[1].pos[1] > imgs[0].pos[1] + imgs[0].size[1], "the second page sits under the first");
+        assert_eq!(h.app.selection.len(), 2);
+        let img = image_el(&h);
+        assert!(
+            (img.size[0] - 816.0).abs() < 1.0 && (img.size[1] - 1056.0).abs() < 1.0,
+            "printed size: {:?}",
+            img.size
+        );
+        assert!((img.pos[0] + img.size[0] / 2.0 - 500.0).abs() < 0.5 && img.pos[1] == 100.0, "{:?}", img.pos);
+        assert!(h.app.selection.contains(&img.id), "the pages come in selected");
+        h.app.undo();
+        assert!(h.elements().is_empty(), "one undo takes the whole PDF back out");
+        // Something that isn't really a PDF says so instead of adding a gray box.
+        h.app.insert_pdf(b"%PDF-1.4 nonsense".to_vec(), None, "bad.pdf", &ctx);
+        for _ in 0..200 {
+            if h.app.toast.as_ref().is_some_and(|t| t.error) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            h.step(vec![]);
+        }
+        assert!(h.app.toast.as_ref().is_some_and(|t| t.error));
+        assert!(h.elements().is_empty());
+    }
+
+    #[test]
     fn anything_can_be_locked_even_several_at_once() {
         let mut h = Harness::new();
         h.drag(PointerButton::Primary, &line(200.0, 400.0, 300.0));
@@ -4049,7 +4182,10 @@ mod tests {
         let save = h.app.handwriting.save_button.unwrap().center();
         h.click(save.x, save.y);
         assert_eq!(first_text(&h).font.as_deref(), Some("Tidy"));
-        assert!(!plexi_core::fonts::is_handwriting("Neat"));
+        assert!(plexi_core::fonts::is_handwriting("Tidy"));
+        // (Not checked that "Neat" left the font registry: it is shared by the whole
+        // process, and another test starting up can load this test's saved fonts.)
+        assert!(h.app.handwriting.library.fonts.iter().all(|f| f.name != "Neat"));
 
         // Kept for next time. (Not read back from disk here: tests run side by side and
         // share the data folder setting, so the file may be another test's.)
