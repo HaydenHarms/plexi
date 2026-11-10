@@ -3859,14 +3859,17 @@ mod tests {
         if let Some(d) = &mut h.app.export {
             d.paper = PaperChoice::Preset(0);
         }
-        for _ in 0..40 {
+        // The preview renders on a worker thread; slow machines (CI) take a while.
+        let mut placed = None;
+        for _ in 0..500 {
             h.step(vec![]);
-            if h.app.export.as_ref().is_some_and(|d| d.preview.ready()) {
+            placed = h.ctx.read_response(egui::Id::unique("export-place"));
+            if placed.is_some() && h.app.export.as_ref().is_some_and(|d| d.preview.ready()) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let area = h.ctx.read_response(egui::Id::unique("export-place")).expect("the area is draggable").rect;
+        let area = placed.expect("the area is draggable").rect;
         let from = area.center();
         h.drag(PointerButton::Primary, &[(from.x, from.y), (from.x + 400.0, from.y + 400.0)]);
         let place = h.app.export.as_ref().unwrap().place.expect("moved");
