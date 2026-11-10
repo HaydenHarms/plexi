@@ -3918,8 +3918,9 @@ mod tests {
         assert_eq!(first_text(&h).font.as_deref(), Some("Tidy"));
         assert!(!plexi_core::fonts::is_handwriting("Neat"));
 
-        // Saved for next time.
-        let lib = plexi_core::handwriting::load(&config::handwriting_path());
+        // Kept for next time. (Not read back from disk here: tests run side by side and
+        // share the data folder setting, so the file may be another test's.)
+        let lib = &h.app.handwriting.library;
         let names: Vec<&str> = lib.fonts.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["Tidy", "Messy"]);
         for n in ["Tidy", "Messy"] {
