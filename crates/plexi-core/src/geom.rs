@@ -61,6 +61,15 @@ impl Rect {
     pub fn intersects(&self, o: &Rect) -> bool {
         self.min[0] <= o.max[0] && o.min[0] <= self.max[0] && self.min[1] <= o.max[1] && o.min[1] <= self.max[1]
     }
+
+    /// The part both share, if it has some area.
+    pub fn intersection(&self, o: &Rect) -> Option<Rect> {
+        let r = Rect {
+            min: [self.min[0].max(o.min[0]), self.min[1].max(o.min[1])],
+            max: [self.max[0].min(o.max[0]), self.max[1].min(o.max[1])],
+        };
+        (r.max[0] - r.min[0] > 1e-3 && r.max[1] - r.min[1] > 1e-3).then_some(r)
+    }
 }
 
 pub fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {

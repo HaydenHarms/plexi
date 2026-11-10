@@ -85,7 +85,15 @@ impl Samples {
     /// Start a fresh stroke for `c`, with [`PEN_WIDTH`] and black ink (color and kind
     /// don't matter for the font; they're only there because it's a [`Stroke`]).
     pub fn new_stroke() -> Stroke {
-        Stroke { id: new_id(), kind: InkKind::Pen, color: Color::BLACK, width: PEN_WIDTH, points: Vec::new(), group: 0 }
+        Stroke {
+            id: new_id(),
+            kind: InkKind::Pen,
+            color: Color::BLACK,
+            width: PEN_WIDTH,
+            points: Vec::new(),
+            group: 0,
+            locked: false,
+        }
     }
 
     pub fn push_stroke(&mut self, c: char, stroke: Stroke) {

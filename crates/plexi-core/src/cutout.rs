@@ -137,9 +137,76 @@ pub fn remove_background(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out.into_inner())
 }
 
+/// Where a picture can be seen: a coarse map of how opaque it is, so clicks on its
+/// see-through parts go to whatever is under it instead.
+#[derive(Clone, Debug)]
+pub struct AlphaMask {
+    w: usize,
+    h: usize,
+    /// The most opaque pixel in each cell, rows top to bottom.
+    cells: Vec<u8>,
+}
+
+/// Cells across the longer side of an [`AlphaMask`].
+const MASK_SIDE: u32 = 256;
+/// How opaque a pixel must be to count as something you can see and click.
+const VISIBLE: u8 = 24;
+
+impl AlphaMask {
+    /// The mask of a picture's (first frame's) bytes. `None` when it can't be read or
+    /// shows all over, so it needs no mask.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+        let (iw, ih) = img.dimensions();
+        if iw == 0 || ih == 0 || img.pixels().all(|p| p[3] >= VISIBLE) {
+            return None;
+        }
+        let k = (iw.max(ih) as f32 / MASK_SIDE as f32).max(1.0);
+        let (w, h) = (((iw as f32 / k).ceil() as usize).max(1), ((ih as f32 / k).ceil() as usize).max(1));
+        let mut cells = vec![0u8; w * h];
+        for (x, y, p) in img.enumerate_pixels() {
+            let c = ((y as f32 / k) as usize).min(h - 1) * w + ((x as f32 / k) as usize).min(w - 1);
+            cells[c] = cells[c].max(p[3]);
+        }
+        Some(Self { w, h, cells })
+    }
+
+    /// Whether anything shows at `(u, v)` (fractions across and down the picture) or
+    /// within `slack` of it (fractions too).
+    pub fn shows(&self, u: f32, v: f32, slack: [f32; 2]) -> bool {
+        let cell = |f: f32, n: usize| (f * n as f32).floor() as i64;
+        let (x0, x1) = (cell(u - slack[0], self.w), cell(u + slack[0], self.w));
+        let (y0, y1) = (cell(v - slack[1], self.h), cell(v + slack[1], self.h));
+        (y0.max(0)..=y1.min(self.h as i64 - 1)).any(|y| {
+            (x0.max(0)..=x1.min(self.w as i64 - 1)).any(|x| self.cells[y as usize * self.w + x as usize] >= VISIBLE)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mask_knows_where_a_picture_shows() {
+        let mut img = image::RgbaImage::new(400, 200);
+        for y in 20..40 {
+            for x in 300..320 {
+                img.put_pixel(x, y, image::Rgba([200, 30, 30, 255]));
+            }
+        }
+        let mut png = Cursor::new(Vec::new());
+        img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let m = AlphaMask::from_bytes(png.get_ref()).expect("mostly see-through");
+        assert!(m.shows(310.0 / 400.0, 30.0 / 200.0, [0.0, 0.0]));
+        assert!(!m.shows(0.5, 0.5, [0.0, 0.0]), "the empty middle");
+        assert!(m.shows(0.74, 0.15, [0.01, 0.01]), "near the dot, within the slack");
+        // An opaque picture needs no mask.
+        let full = image::RgbaImage::from_pixel(10, 10, image::Rgba([1, 2, 3, 255]));
+        let mut png = Cursor::new(Vec::new());
+        full.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        assert!(AlphaMask::from_bytes(png.get_ref()).is_none());
+    }
 
     fn png(img: &image::RgbaImage) -> Vec<u8> {
         let mut out = Cursor::new(Vec::new());

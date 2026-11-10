@@ -1578,6 +1578,7 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                     let mut movable = false;
                     if let (Some(r), Some(frame)) = (sheet_rect, frame)
                         && let (Some(clip), Some(sheet)) = (frame.clip, dlg.sheet())
+                        && pv.frames.len() == 1
                     {
                         let k = r.width() / sheet[0].max(1.0); // preview points per sheet unit
                         let s = frame.scale();
@@ -1764,6 +1765,36 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                                     ui.end_row();
                                 }
                             }
+                            if dlg.paper != PaperChoice::Fit && dlg.area == Area::Region {
+                                ui.label("Size");
+                                ui.vertical(|ui| {
+                                    use crate::app::SizeMode;
+                                    ui.radio_value(&mut dlg.size_mode, SizeMode::Fit, "Fit on one sheet");
+                                    ui.horizontal(|ui| {
+                                        ui.radio_value(&mut dlg.size_mode, SizeMode::Percent, "Scale");
+                                        let v = egui::DragValue::new(&mut dlg.size_percent)
+                                            .range(10.0..=1000.0)
+                                            .speed(1.0)
+                                            .suffix("%");
+                                        if ui.add(v).changed() {
+                                            dlg.size_mode = SizeMode::Percent;
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.radio_value(&mut dlg.size_mode, SizeMode::Across, "Stretch across");
+                                        let v = egui::DragValue::new(&mut dlg.size_across).range(1..=20).speed(0.05);
+                                        if ui.add(v).changed() {
+                                            dlg.size_mode = SizeMode::Across;
+                                        }
+                                        ui.label(if dlg.size_across == 1 { "sheet" } else { "sheets" });
+                                    });
+                                    let n = dlg.preview.total();
+                                    if dlg.size_mode != SizeMode::Fit && n > 1 {
+                                        ui.weak(format!("Prints on {n} sheets, to tape together"));
+                                    }
+                                });
+                                ui.end_row();
+                            }
                             if dlg.paper != PaperChoice::Fit && dlg.area != Area::Region {
                                 ui.label("Fit");
                                 ui.vertical(|ui| {
@@ -1842,6 +1873,16 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
 
 // ----- right-click menu -----------------------------------------------------------
 
+/// What to call an element in a menu.
+fn kind_name(e: &Element) -> &'static str {
+    match e {
+        Element::Stroke(_) => "ink",
+        Element::Text(_) => "text",
+        Element::Image(_) => "image",
+        Element::Shape(_) => "shape",
+    }
+}
+
 fn context_menu(app: &mut PlexiApp, ctx: &Context) {
     let Some(menu) = app.context_menu.clone() else { return };
     if ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -1864,36 +1905,34 @@ fn context_menu(app: &mut PlexiApp, ctx: &Context) {
                 let item = |ui: &mut Ui, text: &str| {
                     ui.add(egui::Button::new(text).frame(false).min_size(vec2(190.0, 24.0))).clicked()
                 };
-                if let Some(Element::Image(img)) = &hit {
-                    let ids = [img.id].into();
-                    if img.locked {
-                        if item(ui, "Unlock image") {
-                            app.set_locked(t, &ids, false);
-                            app.selection = ids;
-                            app.tool = Tool::Lasso;
-                            close = true;
-                        }
-                    } else {
-                        if item(ui, "Lock image") {
-                            app.set_locked(t, &ids, true);
-                            close = true;
-                        }
-                        if item(ui, "Crop image") {
-                            app.start_crop(t, img.id);
-                            close = true;
-                        }
-                        if img.crop.is_some() && item(ui, "Remove crop") {
-                            app.remove_crop(t, img.id);
-                            close = true;
-                        }
-                        if item(ui, "Remove background") {
-                            app.remove_image_background(t, img.id);
-                            close = true;
-                        }
-                        if item(ui, "Reset to original size") {
-                            app.reset_image_size(t, img.id, ctx.pixels_per_point());
-                            close = true;
-                        }
+                if let Some(e) = hit.as_ref().filter(|e| e.locked()) {
+                    if item(ui, &format!("Unlock {}", kind_name(e))) {
+                        let ids: std::collections::HashSet<u64> = app.group_of(t, e.id()).into_iter().collect();
+                        app.set_locked(t, &ids, false);
+                        app.selection = ids;
+                        app.tool = Tool::Lasso;
+                        close = true;
+                    }
+                    ui.separator();
+                }
+                if let Some(Element::Image(img)) = &hit
+                    && !img.locked
+                {
+                    if item(ui, "Crop image") {
+                        app.start_crop(t, img.id);
+                        close = true;
+                    }
+                    if img.crop.is_some() && item(ui, "Remove crop") {
+                        app.remove_crop(t, img.id);
+                        close = true;
+                    }
+                    if item(ui, "Remove background") {
+                        app.remove_image_background(t, img.id);
+                        close = true;
+                    }
+                    if item(ui, "Reset to original size") {
+                        app.reset_image_size(t, img.id, ctx.pixels_per_point());
+                        close = true;
                     }
                     ui.separator();
                 }
@@ -1918,13 +1957,18 @@ fn context_menu(app: &mut PlexiApp, ctx: &Context) {
                         app.ungroup_selection();
                         close = true;
                     }
+                    let n = app.selection.len();
+                    if item(ui, &if n == 1 { "Lock".to_owned() } else { format!("Lock all {n}") }) {
+                        app.lock_selection();
+                        close = true;
+                    }
                     if item(ui, "Delete") {
                         app.delete_selection();
                         close = true;
                     }
                     ui.separator();
                 }
-                if !locked_ids.is_empty() && item(ui, &format!("Unlock all images ({})", locked_ids.len())) {
+                if !locked_ids.is_empty() && item(ui, &format!("Unlock everything ({})", locked_ids.len())) {
                     app.set_locked(t, &locked_ids, false);
                     close = true;
                 }
@@ -2091,14 +2135,15 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
                 ("Erase with any tool", "Middle-drag (or pen barrel button)".into()),
                 ("Menu: lock image, group, arrange, paper, delete page", "Right-click (no drag)".into()),
                 ("Resize an image or shape", "Select it, drag a corner (Shift: keep proportions)".into()),
-                ("Turn what's selected", "Drag the round handle above it (Shift: 15° steps)".into()),
-                ("Turn a cropped photo inside its frame", "Shift+drag the round handle".into()),
+                ("Turn what's selected", "Drag from just outside a corner (Shift: 15° steps)".into()),
+                ("Turn a cropped photo inside its frame", "Shift+drag from just outside a corner".into()),
                 ("Set a text box's wrap width", "Drag the handle on its left or right side".into()),
                 ("Resize a text box", "Drag a corner (Shift: keep proportions)".into()),
                 ("Crop an image · take out its background", "Right-click it → Crop image · Remove background".into()),
                 ("Edit a text box", "Double-click it (Select tool) · F2".into()),
                 ("Bold · Italic · Underline", "Ctrl+B · Ctrl+I · Ctrl+U".into()),
                 ("Group · Ungroup", "Ctrl+G · Ctrl+Shift+G".into()),
+                ("Lock the selection (right-click to unlock)", "Ctrl+L".into()),
                 ("Pan", "Right-drag · Space+drag · Shift+scroll · two fingers".into()),
                 ("Zoom", "Scroll wheel · pinch · Ctrl+= / Ctrl+-".into()),
                 ("Fit page", "Ctrl+0".into()),

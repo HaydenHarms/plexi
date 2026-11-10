@@ -603,6 +603,7 @@ fn preview_tools() {
         width: 3.0,
         group: 0,
         rotation: 0.0,
+        locked: false,
     };
     r.app.doc.pages[0].elements.push(plexi_core::Element::Shape(far));
     r.app.touch();
@@ -668,6 +669,54 @@ fn preview_inner_turn() {
 }
 
 #[test]
+#[ignore = "renders stills of turning from a corner, locking, and printing an area over several sheets"]
+fn preview_round_five() {
+    use crate::app::Tool;
+    let out = std::env::temp_dir().join("plexi-preview-five");
+    let mut r = Recorder::new(&out);
+    r.wait(0.2);
+    r.app.tool = Tool::Shape(plexi_core::ShapeKind::Rect);
+    r.drag(PointerButton::Primary, &[(300.0, 260.0), (400.0, 300.0), (520.0, 380.0)], 2);
+    r.app.tool = Tool::Pen;
+    r.drag(PointerButton::Primary, &curve(&[(600.0, 420.0), (700.0, 360.0), (820.0, 440.0)], 10), 2);
+    let t = r.app.target();
+    let id = r.app.doc.pages[0].elements[0].id();
+    r.app.selection = [id].into();
+    r.app.tool = Tool::Hand;
+    r.wait(0.2);
+    r.snapshot("selected-no-knob");
+    let (view, origin) = (r.app.view, r.app.canvas_origin);
+    let spot = r.app.rotate_spot(t, view, origin).unwrap();
+    r.move_to((spot.x, spot.y), 0.2);
+    r.snapshot("corner-hover");
+    r.button(PointerButton::Primary, true);
+    r.move_to((spot.x + 30.0, spot.y + 60.0), 0.3);
+    r.snapshot("turning");
+    r.button(PointerButton::Primary, false);
+    r.app.select_all();
+    r.app.lock_selection();
+    r.wait(0.2);
+    r.button(PointerButton::Secondary, true);
+    r.button(PointerButton::Secondary, false);
+    r.wait(0.2);
+    r.snapshot("locked-menu");
+    r.app.context_menu = None;
+    r.app.open_export_dialog();
+    r.app.set_export_area(t, plexi_core::Rect::from_min_size([280.0, 240.0], [560.0, 220.0]));
+    if let Some(d) = &mut r.app.export {
+        d.paper = crate::app::PaperChoice::Preset(0);
+        d.size_mode = crate::app::SizeMode::Across;
+        d.size_across = 3;
+    }
+    for _ in 0..30 {
+        r.wait(0.1);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    r.snapshot("across");
+    r.finish();
+}
+
+#[test]
 #[ignore = "renders stills of rotating, outlines, shape handles, groups, the toast and print placement"]
 fn preview_round_four() {
     use crate::app::Tool;
@@ -695,7 +744,7 @@ fn preview_round_four() {
     r.snapshot("outlines");
     let t = r.app.target();
     let (view, origin) = (r.app.view, r.app.canvas_origin);
-    let (handle, _) = r.app.rotate_handle(t, view, origin).unwrap();
+    let handle = r.app.rotate_spot(t, view, origin).unwrap();
     let c = view.to_screen(origin, r.app.selection_bounds(t).unwrap().center());
     r.move_to((handle.x, handle.y), 0.2);
     r.snapshot("rotate-hover");

@@ -442,6 +442,7 @@ mod tests {
             width: 3.0,
             points: vec![InkPoint::new(1.0, 1.0, 0.5), InkPoint::new(30.0, 40.0, 1.0)],
             group: 0,
+            locked: false,
         }));
         let svg = page_svg(&page, &Assets::new(), &RenderOptions::default());
         assert!(crate::export::parse_svg(&svg).is_ok());

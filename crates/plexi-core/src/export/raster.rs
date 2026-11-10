@@ -124,6 +124,7 @@ mod tests {
                 width: 10.0,
                 points: vec![InkPoint::new(x, 20.0, 0.5), InkPoint::new(x, 80.0, 0.5)],
                 group: 0,
+                locked: false,
             }));
         }
         let frame = Frame {
@@ -146,6 +147,7 @@ mod tests {
             width: 10.0,
             points: vec![InkPoint::new(10.0, 50.0, 0.5), InkPoint::new(90.0, 50.0, 0.5)],
             group: 0,
+            locked: false,
         }));
         let img = page_rgba(&page, &Assets::new(), &RenderOptions { scale: 1.0, ..Default::default() }).unwrap();
         assert_eq!((img.width(), img.height()), (100, 100));
@@ -233,6 +235,7 @@ mod tests {
                 InkPoint::new(90.0, 50.0, 0.5),
             ],
             group: 0,
+            locked: false,
         }));
         let img = page_rgba(&page, &Assets::new(), &RenderOptions { scale: 1.0, ..Default::default() }).unwrap();
         let a = img.get_pixel(30, 50)[3];

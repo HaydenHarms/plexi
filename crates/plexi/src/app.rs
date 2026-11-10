@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use egui::{Context, Key, Modifiers, ViewportCommand};
 #[cfg(test)]
 use plexi_core::Shape;
-use plexi_core::export::layout::{self, Area, Layout};
+use plexi_core::export::layout::{self, Area, Layout, RegionSize};
 use plexi_core::export::{ExportFormat, RenderOptions};
 use plexi_core::{Color, Document, Element, ImageEl, InkKind, Page, ShapeKind, TextBox, format, new_id};
 
@@ -157,7 +157,20 @@ pub struct ExportDialog {
     pub region: Option<plexi_core::Rect>,
     /// Where the area sits on its sheet, dragged in the preview (see `Layout::place`).
     pub place: Option<[f32; 2]>,
+    /// How big the picked area prints on paper: fit on one sheet, at `size_percent`, or
+    /// `size_across` sheets wide.
+    pub size_mode: SizeMode,
+    pub size_percent: f32,
+    pub size_across: u32,
     pub preview: crate::ui::Preview,
+}
+
+/// See [`ExportDialog::size_mode`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SizeMode {
+    Fit,
+    Percent,
+    Across,
 }
 
 impl ExportDialog {
@@ -179,6 +192,11 @@ impl ExportDialog {
             margin: self.margin_in * 96.0,
             region: self.region,
             place: self.place,
+            region_size: match self.size_mode {
+                SizeMode::Fit => RegionSize::Fit,
+                SizeMode::Percent => RegionSize::Scale(self.size_percent / 100.0),
+                SizeMode::Across => RegionSize::Across(self.size_across),
+            },
         }
     }
 
@@ -283,6 +301,9 @@ pub struct PlexiApp {
     pub last_sample_time: f64,
     pub cache: MeshCache,
     pub textures: HashMap<String, AssetTexture>,
+    /// Where each picture can be seen (see-through parts don't take clicks), made when
+    /// first needed. `None` for pictures that show all over.
+    pub alpha_masks: std::cell::RefCell<HashMap<String, Option<std::sync::Arc<plexi_core::cutout::AlphaMask>>>>,
     pub fonts: FontBook,
     /// The text box being edited got a new font or style (a change even if the words
     /// stay the same).
@@ -372,6 +393,7 @@ impl PlexiApp {
             last_sample_time: 0.0,
             cache: MeshCache::default(),
             textures: HashMap::new(),
+            alpha_masks: Default::default(),
             fonts: FontBook::default(),
             edit_style_changed: false,
             crop: None,
@@ -541,6 +563,7 @@ impl PlexiApp {
         self.page = 0;
         self.fit_pending = true;
         self.textures.clear();
+        self.alpha_masks.borrow_mut().clear();
         self.dirty = false;
         self.context_menu = None;
         self.revision += 1;
@@ -1334,19 +1357,35 @@ impl PlexiApp {
             self.page_ref(self.target()).elements.iter().filter(|e| !e.locked()).map(Element::id).collect();
     }
 
-    /// Lock or unlock images. Locked images stay put: no selecting, moving or resizing.
+    /// Lock or unlock elements (and the rest of their groups). Locked things stay put:
+    /// no selecting, moving, resizing or erasing.
     pub fn set_locked(&mut self, t: Target, ids: &HashSet<u64>, locked: bool) {
+        let ids: HashSet<u64> = ids.iter().flat_map(|id| self.group_of(t, *id)).collect();
         self.checkpoint(t);
         for e in &mut self.page_mut(t).elements {
-            if let Element::Image(img) = e
-                && ids.contains(&img.id)
-            {
-                img.locked = locked;
+            if ids.contains(&e.id()) {
+                e.set_locked(locked);
             }
         }
         if locked {
             self.selection.retain(|id| !ids.contains(id));
         }
+        self.touch();
+    }
+
+    /// Lock everything selected.
+    pub fn lock_selection(&mut self) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let (t, ids) = (self.target(), self.selection.clone());
+        let n = ids.len();
+        self.set_locked(t, &ids, true);
+        self.toast(if n == 1 {
+            "Locked — right-click it to unlock".to_owned()
+        } else {
+            format!("Locked {n} things")
+        });
     }
 
     /// Move the selection to the top (`front`) or bottom of the stacking order.
@@ -2067,6 +2106,9 @@ impl PlexiApp {
         } else if cmd(Key::G) {
             self.group_selection();
         }
+        if cmd(Key::L) {
+            self.lock_selection();
+        }
         if plain(Key::F2) {
             // Edit the selected text box.
             let t = self.target();
@@ -2226,6 +2268,9 @@ impl PlexiApp {
             page_list: String::new(),
             region,
             place: None,
+            size_mode: SizeMode::Fit,
+            size_percent: 100.0,
+            size_across: 2,
             preview: Default::default(),
         });
     }
@@ -3484,6 +3529,86 @@ mod tests {
     }
 
     #[test]
+    fn see_through_parts_of_a_picture_dont_take_clicks() {
+        // A picture that is empty but for a small dot near its corner, like an ink-only
+        // snip pasted onto the screen: clicks go through everywhere but the dot.
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.enter_overlay(&ctx, false);
+        h.step(vec![]);
+        let mut img = image::RgbaImage::new(400, 300);
+        for y in 10..20 {
+            for x in 380..390 {
+                img.put_pixel(x, y, image::Rgba([214, 40, 40, 255]));
+            }
+        }
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        h.app.insert_image(bytes.into_inner(), Some([300.0, 250.0]), &ctx);
+        h.step(vec![]);
+        let el = h.app.doc.overlay.elements.iter().find_map(|e| match e {
+            Element::Image(i) => Some(i.clone()),
+            _ => None,
+        });
+        let el = el.expect("pasted");
+        let (view, origin) = (h.app.view_for(Target::Overlay), h.app.canvas_origin);
+        let at = |fx: f32, fy: f32| view.to_screen(origin, [el.pos[0] + el.size[0] * fx, el.pos[1] + el.size[1] * fy]);
+        h.app.selection.clear();
+        let middle = at(0.5, 0.5);
+        h.drag(PointerButton::Secondary, &[(middle.x, middle.y)]);
+        assert_eq!(h.app.context_menu.as_ref().map(|m| m.hit), Some(None), "nothing there to pick");
+        assert!(h.app.selection.is_empty());
+        h.step(vec![Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        }]);
+        let dot = at(385.0 / 400.0, 15.0 / 300.0);
+        h.drag(PointerButton::Secondary, &[(dot.x, dot.y)]);
+        assert_eq!(h.app.context_menu.as_ref().map(|m| m.hit), Some(Some(el.id)), "the dot can be picked");
+    }
+
+    #[test]
+    fn anything_can_be_locked_even_several_at_once() {
+        let mut h = Harness::new();
+        h.drag(PointerButton::Primary, &line(200.0, 400.0, 300.0));
+        h.app.tool = Tool::Shape(ShapeKind::Rect);
+        h.drag(PointerButton::Primary, &[(500.0, 250.0), (560.0, 300.0), (600.0, 350.0)]);
+        let ctx = h.ctx.clone();
+        h.app.insert_text("keep me".into(), &ctx);
+        h.app.select_all();
+        assert_eq!(h.app.selection.len(), 3);
+        h.step(vec![ctrl(Key::L, false)]);
+        assert!(h.elements().iter().all(Element::locked), "everything selected got locked");
+        assert!(h.app.selection.is_empty());
+        // Locked things can't be picked up, selected or erased.
+        h.app.select_all();
+        assert!(h.app.selection.is_empty(), "select all skips locked things");
+        h.app.tool = Tool::Lasso;
+        h.click(300.0, 300.0);
+        assert!(h.app.selection.is_empty());
+        h.drag(
+            PointerButton::Primary,
+            &[(150.0, 200.0), (700.0, 200.0), (700.0, 400.0), (150.0, 400.0), (150.0, 210.0)],
+        );
+        assert!(h.app.selection.is_empty(), "a lasso skips them too");
+        h.app.tool = Tool::Eraser;
+        h.drag(PointerButton::Primary, &line(200.0, 400.0, 300.0));
+        assert_eq!(h.elements().len(), 3, "the eraser leaves locked ink alone");
+        // Right-click one to unlock it.
+        h.drag(PointerButton::Secondary, &[(300.0, 300.0)]);
+        let hit = h.app.context_menu.as_ref().and_then(|m| m.hit).expect("the locked line is found");
+        h.app.set_locked(Target::Page(0), &[hit].into(), false);
+        assert_eq!(h.elements().iter().filter(|e| e.locked()).count(), 2);
+        // And it survives saving.
+        let bytes = plexi_core::format::to_bytes(&h.app.doc).unwrap();
+        let back = plexi_core::format::from_bytes(&bytes).unwrap();
+        assert_eq!(back.pages[0].elements.iter().filter(|e| e.locked()).count(), 2);
+    }
+
+    #[test]
     fn right_click_opens_the_menu_and_right_drag_still_erases() {
         let mut h = Harness::new();
         h.drag(PointerButton::Primary, &line(200.0, 600.0, 300.0));
@@ -3622,8 +3747,15 @@ mod tests {
             .expect("a shape")
     }
 
+    /// Screen point `p` turned `deg` degrees (clockwise) around `c`.
+    fn around(c: Pos2, p: Pos2, deg: f32) -> Pos2 {
+        let (s, k) = deg.to_radians().sin_cos();
+        let d = p - c;
+        c + egui::vec2(d.x * k - d.y * s, d.x * s + d.y * k)
+    }
+
     #[test]
-    fn the_rotate_handle_turns_the_selection() {
+    fn dragging_just_off_a_corner_turns_the_selection() {
         let mut h = Harness::new();
         h.app.tool = Tool::Shape(ShapeKind::Rect);
         h.drag(PointerButton::Primary, &[(300.0, 300.0), (400.0, 340.0), (500.0, 400.0)]);
@@ -3632,12 +3764,14 @@ mod tests {
         let before = shape(&h);
         assert_eq!(h.app.selection, HashSet::from([before.id]));
         let (view, origin, t) = (h.app.view, h.app.canvas_origin, h.app.target());
-        let (handle, _) = h.app.rotate_handle(t, view, origin).expect("a rotate handle above the selection");
-        // Drag the handle from straight above the middle round to its right: a
-        // quarter turn clockwise.
+        let handle = h.app.rotate_spot(t, view, origin).expect("a turning zone off the corner");
+        // There's no knob to grab; the cursor shows turning just off the corner.
+        assert!(h.app.in_rotate_zone(t, view, origin, handle));
+        assert!(!h.app.in_rotate_zone(t, view, origin, pos2(400.0, 340.0)), "not inside the box");
+        assert!(!h.app.in_rotate_zone(t, view, origin, pos2(400.0, 200.0)), "not far above it");
+        // Drag from there a quarter of the way round, clockwise.
         let c = view.to_screen(origin, plexi_core::Rect::from_points([before.a, before.b]).center());
-        let right = c + egui::vec2(handle.distance(c), 0.0);
-        let mid = c + (egui::vec2(1.0, -1.0) * handle.distance(c) / 2f32.sqrt());
+        let (mid, right) = (around(c, handle, 45.0), around(c, handle, 90.0));
         h.drag(PointerButton::Primary, &[(handle.x, handle.y), (mid.x, mid.y), (right.x, right.y)]);
         let turned = shape(&h);
         assert!((turned.rotation - std::f32::consts::FRAC_PI_2).abs() < 0.05, "{}", turned.rotation);
@@ -3664,12 +3798,11 @@ mod tests {
         h.app.select_all();
         h.app.tool = Tool::Hand;
         h.step(vec![]);
-        let (handle, _) = h.app.rotate_handle(t, view, origin).expect("handle");
+        let handle = h.app.rotate_spot(t, view, origin).expect("turning zone");
         let b = h.app.selection_bounds(t).unwrap();
         let c = view.to_screen(origin, b.center());
         h.set_shift(true); // snaps to 15° steps
-        let left = c - egui::vec2(handle.distance(c), -2.0);
-        let mid = c + (egui::vec2(-1.0, -1.0) * handle.distance(c) / 2f32.sqrt());
+        let (mid, left) = (around(c, handle, -45.0), around(c, handle, -89.0));
         h.drag(PointerButton::Primary, &[(handle.x, handle.y), (mid.x, mid.y), (left.x, left.y)]);
         h.set_shift(false);
         for e in h.elements() {
@@ -3991,12 +4124,10 @@ mod tests {
         h.step(vec![]);
         let (view, origin) = (h.app.view, h.app.canvas_origin);
         let turn = |h: &mut Harness| {
-            let (handle, _) = h.app.rotate_handle(t, view, origin).expect("handle");
+            let handle = h.app.rotate_spot(t, view, origin).expect("turning zone");
             let c = view.to_screen(origin, h.app.selection_bounds(t).unwrap().center());
-            let d = handle.distance(c);
             // A sixth of a turn clockwise.
-            let to = c + egui::vec2(d * 0.866, -d * 0.5);
-            let mid = c + egui::vec2(d * 0.5, -d * 0.866);
+            let (mid, to) = (around(c, handle, 30.0), around(c, handle, 60.0));
             h.drag(PointerButton::Primary, &[(handle.x, handle.y), (mid.x, mid.y), (to.x, to.y)]);
         };
         h.set_shift(true);

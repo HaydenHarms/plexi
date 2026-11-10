@@ -187,6 +187,10 @@ pub struct Stroke {
     /// Elements sharing a nonzero group are selected and moved together.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub group: u64,
+    /// Locked elements can't be selected, moved, resized or erased until unlocked
+    /// (right-click).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -216,6 +220,10 @@ pub struct TextBox {
     pub rotation: f32,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub group: u64,
+    /// Locked elements can't be selected, moved, resized or erased until unlocked
+    /// (right-click).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 /// The font text boxes use unless another is picked. It is bundled, so it looks the same
@@ -238,6 +246,7 @@ impl TextBox {
             wrap: None,
             rotation: 0.0,
             group: 0,
+            locked: false,
         }
     }
 
@@ -456,12 +465,16 @@ pub struct Shape {
     pub rotation: f32,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub group: u64,
+    /// Locked elements can't be selected, moved, resized or erased until unlocked
+    /// (right-click).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 impl Shape {
     /// A shape with no rotation and no group.
     pub fn new(kind: ShapeKind, a: [f32; 2], b: [f32; 2], color: Color, width: f32) -> Self {
-        Self { id: new_id(), kind, a, b, color, width, rotation: 0.0, group: 0 }
+        Self { id: new_id(), kind, a, b, color, width, rotation: 0.0, group: 0, locked: false }
     }
 
     /// The two short strokes of an arrow head at `b`, in page units.
@@ -504,7 +517,21 @@ impl Element {
     }
 
     pub fn locked(&self) -> bool {
-        matches!(self, Element::Image(i) if i.locked)
+        match self {
+            Element::Stroke(s) => s.locked,
+            Element::Text(t) => t.locked,
+            Element::Image(i) => i.locked,
+            Element::Shape(s) => s.locked,
+        }
+    }
+
+    pub fn set_locked(&mut self, locked: bool) {
+        match self {
+            Element::Stroke(s) => s.locked = locked,
+            Element::Text(t) => t.locked = locked,
+            Element::Image(i) => i.locked = locked,
+            Element::Shape(s) => s.locked = locked,
+        }
     }
 
     /// Give the element a fresh id (after its geometry changed).
@@ -932,6 +959,7 @@ mod tests {
             width: 3.0,
             points: vec![InkPoint::new(1.0, 2.0, 0.5), InkPoint::new(3.25, 4.0, 1.0)],
             group: 0,
+            locked: false,
         });
         assert!(!serde_json::to_string(&s).unwrap().contains("group"), "no group, nothing saved");
         let json = serde_json::to_string(&s).unwrap();

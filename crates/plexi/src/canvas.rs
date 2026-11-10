@@ -185,8 +185,8 @@ const HANDLE_REACH: f32 = 10.0;
 /// How far the dashed selection outline sits outside what's selected, in points.
 const SELECTION_PAD: f32 = 4.0;
 
-/// How far above the selection the rotate handle sits, in points.
-const ROTATE_STEM: f32 = 26.0;
+/// How far from a corner of the selection (outside it) a drag turns it, in points.
+const ROTATE_REACH: f32 = 24.0;
 
 /// `p` turned by `angle` around `c`, in screen points.
 fn turn_screen(p: Pos2, c: Pos2, angle: f32) -> Pos2 {
@@ -813,12 +813,13 @@ impl PlexiApp {
         if groups.is_empty() {
             return;
         }
-        let more: Vec<u64> = els.iter().filter(|e| groups.contains(&e.group())).map(Element::id).collect();
+        let more: Vec<u64> =
+            els.iter().filter(|e| !e.locked() && groups.contains(&e.group())).map(Element::id).collect();
         self.selection.extend(more);
     }
 
     /// The ids of everything in the same group as `id` (just `id` if it isn't grouped).
-    fn group_of(&self, t: Target, id: u64) -> Vec<u64> {
+    pub(crate) fn group_of(&self, t: Target, id: u64) -> Vec<u64> {
         let els = &self.page_ref(t).elements;
         match els.iter().find(|e| e.id() == id).map(Element::group) {
             Some(g) if g != 0 => els.iter().filter(|e| e.group() == g).map(Element::id).collect(),
@@ -828,14 +829,15 @@ impl PlexiApp {
 
     fn hit_text(&self, t: Target, p: [f32; 2]) -> Option<u64> {
         self.page_ref(t).elements.iter().rev().find_map(|e| match e {
-            Element::Text(tb) if tb.approx_bounds().expand(4.0).contains(e.to_local(p)) => Some(tb.id),
+            Element::Text(tb) if !tb.locked && tb.approx_bounds().expand(4.0).contains(e.to_local(p)) => Some(tb.id),
             _ => None,
         })
     }
 
-    /// Topmost element under `p` (within `r` page units of ink and outlines).
+    /// Topmost element under `p` (within `r` page units of ink and outlines). A
+    /// picture only counts where it can be seen, not on its see-through parts.
     pub fn hit_element(&self, t: Target, p: [f32; 2], r: f32, include_locked: bool) -> Option<u64> {
-        self.page_ref(t).elements.iter().rev().find_map(|e| {
+        self.page_ref(t).elements.iter().rev().filter(|e| include_locked || !e.locked()).find_map(|e| {
             // Turned elements are hit tested in their own, unturned frame.
             let q = e.to_local(p);
             let hit = match e {
@@ -843,11 +845,30 @@ impl PlexiApp {
                 Element::Shape(s) => shape_hit(s, q, r),
                 Element::Text(tb) => tb.approx_bounds().expand(4.0).contains(q),
                 Element::Image(i) => {
-                    plexi_core::Rect::from_min_size(i.pos, i.size).contains(q) && (include_locked || !i.locked)
+                    plexi_core::Rect::from_min_size(i.pos, i.size).contains(q) && self.image_shows_at(i, q, r)
                 }
             };
             hit.then(|| e.id())
         })
+    }
+
+    /// Whether picture `img` can be seen at `q` (in its own, unturned frame) or within
+    /// `r` page units of it.
+    fn image_shows_at(&self, img: &plexi_core::ImageEl, q: [f32; 2], r: f32) -> bool {
+        let mask = self
+            .alpha_masks
+            .borrow_mut()
+            .entry(img.asset.clone())
+            .or_insert_with(|| {
+                let bytes = self.doc.assets.get(&img.asset)?;
+                plexi_core::cutout::AlphaMask::from_bytes(bytes).map(std::sync::Arc::new)
+            })
+            .clone();
+        let Some(mask) = mask else { return true };
+        let full = img.full_rect();
+        let q = rotate_point(q, img.frame_center(), -img.inner_rotation);
+        let (w, h) = (full.width().max(1e-3), full.height().max(1e-3));
+        mask.shows((q[0] - full.min[0]) / w, (q[1] - full.min[1]) / h, [r / w, r / h])
     }
 
     /// The single selected, unlocked image, if that is what is selected.
@@ -999,9 +1020,10 @@ impl PlexiApp {
         Some(Interaction::ShapeResize { id: s.id, which, orig: s, changed: false })
     }
 
-    /// Where the rotate handle is, on screen, and the stem it hangs from (the middle of
-    /// the top of the selection), when something is selected that can be turned.
-    pub fn rotate_handle(&self, t: Target, view: View, origin: Pos2) -> Option<(Pos2, Pos2)> {
+    /// The outline the selection turns from, on screen, when something is selected
+    /// that can be turned: the (turned) outline of a single thing or group, or the box
+    /// around several. Just outside its corners, a drag turns the selection.
+    fn rotate_outline(&self, t: Target, view: View, origin: Pos2) -> Option<[Pos2; 4]> {
         if self.crop.is_some()
             || self.editing_text.is_some()
             || !matches!(self.tool, Tool::Lasso | Tool::RectSelect | Tool::Hand)
@@ -1010,15 +1032,36 @@ impl PlexiApp {
             return None;
         }
         let b = self.selection_bounds(t)?;
-        let r = view.rect_to_screen(origin, b).expand(SELECTION_PAD);
-        let top = r.center_top();
-        Some((top - vec2(0.0, ROTATE_STEM), top))
+        let outlines = self.selection_outlines(t, SELECTION_PAD / view.zoom);
+        let o = match outlines.as_slice() {
+            [one] => *one,
+            _ => corners(b.expand(SELECTION_PAD / view.zoom)),
+        };
+        Some(o.map(|q| view.to_screen(origin, q)))
     }
 
-    /// Start turning the selection if `pos` is on the rotate handle.
+    /// Whether screen point `pos` is in the turning zone: just outside a corner of the
+    /// selection (resize handles, which sit on the corners, win where they overlap).
+    pub fn in_rotate_zone(&self, t: Target, view: View, origin: Pos2, pos: Pos2) -> bool {
+        let Some(o) = self.rotate_outline(t, view, origin) else { return false };
+        let pts = o.map(|q| [q.x, q.y]);
+        !point_in_polygon([pos.x, pos.y], &pts) && o.iter().any(|c| c.distance(pos) <= ROTATE_REACH)
+    }
+
+    /// A screen point in the turning zone (off the top-right corner), for tests and
+    /// demos that turn the selection.
+    #[cfg(test)]
+    pub fn rotate_spot(&self, t: Target, view: View, origin: Pos2) -> Option<Pos2> {
+        let o = self.rotate_outline(t, view, origin)?;
+        let c = o.iter().fold(Vec2::ZERO, |a, q| a + q.to_vec2()) / 4.0;
+        let corner = o[1];
+        let out = (corner - c.to_pos2()).normalized();
+        Some(corner + out * (HANDLE_REACH + 4.0))
+    }
+
+    /// Start turning the selection if `pos` is in the turning zone.
     fn grab_rotate(&mut self, t: Target, view: View, origin: Pos2, pos: Pos2, shift: bool) -> bool {
-        let Some((handle, _)) = self.rotate_handle(t, view, origin) else { return false };
-        if handle.distance(pos) > HANDLE_REACH + 2.0 {
+        if !self.in_rotate_zone(t, view, origin, pos) {
             return false;
         }
         let Some(b) = self.selection_bounds(t) else { return false };
@@ -1044,9 +1087,6 @@ impl PlexiApp {
     /// selected image (when `images`), or a side of a text box. Shared by every tool
     /// that can resize, so the handles work the same whichever of them is out.
     fn grab_handle(&mut self, t: Target, view: View, origin: Pos2, pos: Pos2, images: bool, shift: bool) -> bool {
-        if images && self.grab_rotate(t, view, origin, pos, shift) {
-            return true;
-        }
         if images && let Some((id, anchor, dir, orig)) = self.handle_at(t, view, origin, pos) {
             let (angle, pivot) = self.selected_image(t).map_or((0.0, [0.0, 0.0]), |i| Element::Image(i).rotation());
             self.pending_snapshot = Some(self.snapshot_of(t));
@@ -1063,7 +1103,7 @@ impl PlexiApp {
             self.interaction = resize;
             return true;
         }
-        false
+        images && self.grab_rotate(t, view, origin, pos, shift)
     }
 
     // ----- cropping ------------------------------------------------------------------
@@ -1189,6 +1229,7 @@ impl PlexiApp {
         let mut out = Vec::with_capacity(old.len());
         for el in old {
             match &el {
+                _ if el.locked() => out.push(el),
                 Element::Stroke(s) if partial => match ink::erase_partial(s, p, r) {
                     None => out.push(el),
                     Some(pieces) => {
@@ -1281,8 +1322,15 @@ impl PlexiApp {
             Tool::Pen | Tool::Highlighter => {
                 let kind = if tool == Tool::Pen { InkKind::Pen } else { InkKind::Highlighter };
                 let color = if kind == InkKind::Pen { self.pen_color } else { self.highlighter_color };
-                let stroke =
-                    Stroke { id: new_id(), kind, color, width: self.ink_width(kind), points: Vec::new(), group: 0 };
+                let stroke = Stroke {
+                    id: new_id(),
+                    kind,
+                    color,
+                    width: self.ink_width(kind),
+                    points: Vec::new(),
+                    group: 0,
+                    locked: false,
+                };
                 let ppu = view.zoom * 1.5; // ~half a physical pixel on typical displays
                 let mut b = StrokeBuilder::new(stroke, self.config.smoothing, 0.5 / ppu);
                 b.push(now, p, self.pressure());
@@ -1688,11 +1736,11 @@ impl PlexiApp {
             }
             Interaction::Lasso { pts, extend, .. } => {
                 if pts.len() < 3 {
-                    // A click on empty space, or on a locked image.
+                    // A click on empty space, or on something locked.
                     if let Some(p) = pts.first()
                         && self.hit_element(t, *p, 4.0 / view.zoom, true).is_some()
                     {
-                        self.toast("That image is locked — right-click it to unlock");
+                        self.toast("That's locked — right-click it to unlock");
                     }
                     return;
                 }
@@ -1755,6 +1803,7 @@ impl PlexiApp {
                         width: self.config.pen_width,
                         group: 0,
                         rotation: 0.0,
+                        locked: false,
                     };
                     self.page_mut(t).elements.push(Element::Shape(shape));
                 }
@@ -1896,15 +1945,9 @@ impl PlexiApp {
             }
             _ => None,
         };
-        let on_rotate = matches!(self.interaction, Interaction::Rotate { .. })
-            || self.rotate_handle(t, view, rect.min).is_some_and(|(h, _)| h.distance(pos) <= HANDLE_REACH + 2.0);
         let on_shape_handle = matches!(self.interaction, Interaction::ShapeResize { .. })
             || (matches!(self.tool, Tool::Lasso | Tool::RectSelect | Tool::Hand)
                 && self.shape_handle_at(t, view, rect.min, pos).is_some());
-        if !erasing && (on_rotate || on_shape_handle) {
-            ui.ctx().set_cursor_icon(if on_rotate { CursorIcon::Grab } else { CursorIcon::Crosshair });
-            return;
-        }
         let image_handle = match &self.interaction {
             Interaction::Resize { dir, .. } => Some(*dir),
             _ if matches!(self.tool, Tool::Lasso | Tool::RectSelect | Tool::Hand) => {
@@ -1912,6 +1955,30 @@ impl PlexiApp {
             }
             _ => None,
         };
+        let idle = matches!(self.interaction, Interaction::Idle);
+        let on_rotate = matches!(self.interaction, Interaction::Rotate { .. })
+            || (idle
+                && text_handle.is_none()
+                && image_handle.is_none()
+                && !on_shape_handle
+                && self.in_rotate_zone(t, view, rect.min, pos));
+        if !erasing && on_rotate {
+            // No system cursor shows turning, so paint one: a curved arrow on a disc.
+            ui.ctx().set_cursor_icon(CursorIcon::None);
+            painter.circle_filled(pos, 10.0, Color32::WHITE);
+            painter.circle_stroke(pos, 10.0, EStroke::new(1.0, Color32::from_gray(40)));
+            crate::ui::paint_icon(
+                &painter,
+                Rect::from_center_size(pos, vec2(14.0, 14.0)),
+                crate::ui::Icon::Rotate,
+                Color32::from_gray(20),
+            );
+            return;
+        }
+        if !erasing && on_shape_handle {
+            ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+            return;
+        }
         let resize = if erasing {
             None
         } else if let Some(corner) = text_handle {
@@ -2077,6 +2144,7 @@ impl PlexiApp {
                     width: self.config.pen_width,
                     group: 0,
                     rotation: 0.0,
+                    locked: false,
                 };
                 paint_shape(&painter, &s, view, origin, [0.0, 0.0]);
             }
@@ -2151,15 +2219,13 @@ impl PlexiApp {
                 handle(view.to_screen(origin, q) + shift_by, 9.0);
             }
         }
-        // The rotate handle: a round knob on a short stem above the selection.
+        // While turning: a line from the center to the pointer, and the angle.
         if let Interaction::Rotate { center, angle, .. } = &self.interaction {
             let c = view.to_screen(origin, *center);
             if let Some(p) = ui.input(|i| i.pointer.latest_pos()) {
                 painter.line_segment([c, p], EStroke::new(1.0, accent.gamma_multiply(0.6)));
-                painter.circle_filled(p, 6.0, Color32::WHITE);
-                painter.circle_stroke(p, 6.0, EStroke::new(1.5, accent));
                 painter.text(
-                    p + vec2(12.0, -12.0),
+                    p + vec2(14.0, -14.0),
                     Align2::LEFT_BOTTOM,
                     format!("{:.0}°", angle.to_degrees()),
                     FontId::proportional(12.0),
@@ -2167,11 +2233,6 @@ impl PlexiApp {
                 );
             }
             painter.circle_filled(c, 2.5, accent);
-        } else if let Some((h, top)) = self.rotate_handle(t, view, origin) {
-            painter.line_segment([top, h], EStroke::new(1.0, accent));
-            painter.circle_filled(h, 6.0, Color32::WHITE);
-            painter.circle_stroke(h, 6.0, EStroke::new(1.5, accent));
-            crate::ui::paint_icon(&painter, Rect::from_center_size(h, vec2(9.0, 9.0)), crate::ui::Icon::Rotate, accent);
         }
         // A text box's handles sit on its outline: the dashed selection line, or the
         // guide around the box being typed in. Tall bars in the middle of the left and

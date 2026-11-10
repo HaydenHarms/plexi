@@ -32,6 +32,18 @@ pub enum Area {
     Region,
 }
 
+/// How big a picked area ([`Area::Region`]) prints on paper.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum RegionSize {
+    /// Shrunk to fit on one sheet (never enlarged).
+    #[default]
+    Fit,
+    /// At this scale (1 is the size it is on the page), over as many sheets as it takes.
+    Scale(f32),
+    /// Stretched to this many sheets across, and as many down as that takes.
+    Across(u32),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
     pub area: Area,
@@ -49,11 +61,21 @@ pub struct Layout {
     /// room across and down: `[0, 0]` is the top-left margin, `[1, 1]` the bottom-right.
     /// `None` is centered across, at the top. Set by dragging it in the export preview.
     pub place: Option<[f32; 2]>,
+    /// How big a picked area prints on paper.
+    pub region_size: RegionSize,
 }
 
 impl Default for Layout {
     fn default() -> Self {
-        Self { area: Area::Page, sheet: None, tile: false, margin: 0.0, region: None, place: None }
+        Self {
+            area: Area::Page,
+            sheet: None,
+            tile: false,
+            margin: 0.0,
+            region: None,
+            place: None,
+            region_size: RegionSize::Fit,
+        }
     }
 }
 
@@ -130,7 +152,7 @@ pub fn frames(page: &Page, layout: &Layout) -> Vec<Frame> {
     if layout.area == Area::Region {
         let area = area_rect(page, layout);
         for f in &mut out {
-            f.clip = Some(area);
+            f.clip.get_or_insert(area);
         }
     }
     out
@@ -152,8 +174,33 @@ fn sheet_frames(page: &Page, layout: &Layout) -> Vec<Frame> {
     // Shrink to fit one sheet (never enlarge), placed in the room left over: centered
     // across and starting at the top unless it was dragged somewhere else.
     let (iw, ih) = ((w - 2.0 * m).max(1.0), (h - 2.0 * m).max(1.0));
-    let s = (iw / area.width().max(1.0)).min(ih / area.height().max(1.0)).min(1.0);
+    let (aw, ah) = (area.width().max(1.0), area.height().max(1.0));
+    let fit = (iw / aw).min(ih / ah).min(1.0);
+    let s = match layout.region_size {
+        _ if layout.area != Area::Region => fit,
+        RegionSize::Fit => fit,
+        RegionSize::Scale(k) => k.clamp(0.01, 100.0),
+        RegionSize::Across(n) => n.clamp(1, 50) as f32 * iw / aw,
+    };
     let (vw, vh) = (w / s, h / s);
+    // Bigger than a sheet: split it into a grid of sheets, each printing its own cell.
+    let grid = |room: f32, size: f32| ((size * s / room) - 1e-3).ceil().max(1.0) as usize;
+    let (cols, rows) = (grid(iw, aw), grid(ih, ah));
+    if cols * rows > 1 {
+        let mut out = Vec::with_capacity(cols * rows);
+        for r in 0..rows {
+            for c in 0..cols {
+                let cell = Rect::from_min_size(
+                    [area.min[0] + c as f32 * iw / s, area.min[1] + r as f32 * ih / s],
+                    [iw / s, ih / s],
+                );
+                let Some(clip) = cell.intersection(&area) else { continue };
+                let view = Rect::from_min_size([cell.min[0] - m / s, cell.min[1] - m / s], [vw, vh]);
+                out.push(Frame { view, size: [w, h], clip: Some(clip) });
+            }
+        }
+        return out;
+    }
     let [fx, fy] = layout.placement();
     let spare = [(iw - area.width() * s).max(0.0), (ih - area.height() * s).max(0.0)];
     let left = area.min[0] - (m + fx * spare[0]) / s;
@@ -204,6 +251,7 @@ mod tests {
             width: 0.0,
             group: 0,
             rotation: 0.0,
+            locked: false,
         })
     }
 
@@ -284,6 +332,37 @@ mod tests {
         layout.margin = 50.0;
         layout.place = Some([0.0, 0.0]);
         assert_eq!(at(&layout), [50.0, 50.0], "never into the margin");
+    }
+
+    #[test]
+    fn a_region_can_be_stretched_over_several_sheets() {
+        let mut page = Page::new("p", PageSize::Infinite);
+        page.elements.push(dot(100.0, 100.0));
+        let region = Rect::from_min_size([0.0, 0.0], [300.0, 200.0]);
+        let base =
+            Layout { area: Area::Region, sheet: Some([200.0, 100.0]), region: Some(region), ..Default::default() };
+        // Fit: one sheet, shrunk.
+        assert_eq!(frames(&page, &base).len(), 1);
+        // Full size: 2 across, 2 down, each sheet showing its own part.
+        let full = Layout { region_size: RegionSize::Scale(1.0), ..base };
+        let f = frames(&page, &full);
+        assert_eq!(f.len(), 4);
+        assert!(f.iter().all(|f| f.scale() == 1.0));
+        assert_eq!(f[0].clip, Some(Rect::from_min_size([0.0, 0.0], [200.0, 100.0])));
+        assert_eq!(f[3].clip, Some(Rect::from_min_size([200.0, 100.0], [100.0, 100.0])));
+        // Three sheets across: three times the sheet's width, so 6 sheets down.
+        let across = Layout { region_size: RegionSize::Across(3), margin: 10.0, ..base };
+        let f = frames(&page, &across);
+        let s = f[0].scale();
+        assert!((300.0 * s - 3.0 * 180.0).abs() < 0.01, "{s}");
+        assert_eq!(f.len(), 3 * (200.0 * s / 80.0f32).ceil() as usize);
+        // The printable part of each sheet starts inside the margin.
+        assert!((f[1].clip.unwrap().min[0] - f[1].view.min[0]) * s - 10.0 < 0.01);
+        // Small enough to fit: still one sheet, at that scale.
+        let small = Layout { region_size: RegionSize::Scale(0.5), ..base };
+        let f = frames(&page, &small);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].scale(), 0.5);
     }
 
     #[test]
