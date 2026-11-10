@@ -1,12 +1,2 @@
-- [x] Let's add drag placement of selected areas on the print preview
-- [x] Allow for multiple, named handwriting fonts
-- [x] Allow font file format exporting
-- [x] Allow dynamic scaling with text boxes as well, right now it's only proportional
-- [x] We need a grouping function in the right click menu
-- [x] Allow resizing of shapes, I thought that would have been intuitive in the first place
-- [x] Add rotation of shapes, text, images, etc.
-- [x] When selecting multiple, show each individual selection rather than expanding one selection box, thanks
-- [x] Saved message text stacks weird
-- [x] F2 to edit currently selected text box
-- [x] Right-click remove background function
-- [x] Ctrl + b, i, u for font changing
+- [ ] Make rotating happen when your cursor is just outside of the scaling boxes on the corners, i dont like the obtrusiveness of the rotating circle coming out
+- [ ] Allow scaling variety for selected area printing, allowing you to stretch a selected area over multiple pages if it is a lot
