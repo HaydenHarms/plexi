@@ -10,6 +10,7 @@ mod config;
 mod fonts;
 mod handwriting;
 mod history;
+mod instance;
 mod platform;
 mod record;
 #[cfg(test)]
@@ -38,12 +39,17 @@ fn main() -> ExitCode {
     }
     env_logger::init();
 
-    let start = app::StartOptions {
-        file: args.iter().find(|a| !a.starts_with("--")).map(PathBuf::from),
-        overlay: args.iter().any(|a| a == "--draw" || a == "--overlay"),
-        background: args.iter().any(|a| a == "--background"),
-        shell: true,
+    let file = args.iter().find(|a| !a.starts_with("--")).map(PathBuf::from);
+    let overlay = args.iter().any(|a| a == "--draw" || a == "--overlay");
+    let background = args.iter().any(|a| a == "--background");
+    // If Plexi is already running, pass this launch to it: one copy owns the hotkeys.
+    let request = instance::Request::from_start(file.as_deref(), overlay, background);
+    platform::allow_foreground_handoff();
+    let instance = match instance::claim(&config::data_dir(), &request) {
+        instance::Claim::Handed => return ExitCode::SUCCESS,
+        instance::Claim::Run(p) => p,
     };
+    let start = app::StartOptions { file, overlay, background, shell: true, instance };
     let (rgba, w, h) = app_icon_rgba(64);
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Plexi")

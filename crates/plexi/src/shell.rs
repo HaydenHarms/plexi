@@ -9,9 +9,13 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellEvent {
     ToggleDraw,
+    /// Start drawing on the screen (from a later `plexi --draw`).
+    Draw,
+    /// Open a notebook (from a later launch with a file).
+    Open(std::path::PathBuf),
     ClearOverlay,
     ShowNotebook,
     Snip,
@@ -22,6 +26,7 @@ pub struct Shell {
     pub events: Receiver<ShellEvent>,
     _tray: Option<TrayIcon>,
     _hotkeys: Option<GlobalHotKeyManager>,
+    instance: Option<crate::instance::Listening>,
     /// Hotkeys that could not be registered (already taken by another app).
     pub failed_hotkeys: Vec<String>,
 }
@@ -45,8 +50,22 @@ fn parse_hotkey(s: &str) -> Option<HotKey> {
 }
 
 impl Shell {
-    pub fn start(ctx: &egui::Context, cfg: &crate::config::Config) -> Self {
+    pub fn start(ctx: &egui::Context, cfg: &crate::config::Config, instance: Option<crate::instance::Primary>) -> Self {
         let (tx, rx) = channel();
+        let instance = instance.map(|p| {
+            let (tx, ctx) = (tx.clone(), ctx.clone());
+            p.serve(move |req| {
+                use crate::instance::Request;
+                let ev = match req {
+                    Request::Show => ShellEvent::ShowNotebook,
+                    Request::Draw => ShellEvent::Draw,
+                    Request::Open(p) => ShellEvent::Open(p),
+                    Request::Nothing => return,
+                };
+                let _ = tx.send(ev);
+                ctx.request_repaint();
+            })
+        });
         let mut failed = Vec::new();
 
         let hotkeys = GlobalHotKeyManager::new().ok().inspect(|mgr| {
@@ -67,14 +86,21 @@ impl Shell {
                 if e.state == HotKeyState::Pressed
                     && let Some((_, ev)) = bound.iter().find(|(id, _)| *id == e.id)
                 {
-                    let _ = tx.send(*ev);
+                    let _ = tx.send(ev.clone());
                     ctx.request_repaint();
                 }
             }));
         });
 
         let tray = build_tray(ctx, tx.clone(), cfg);
-        Self { events: rx, _tray: tray, _hotkeys: hotkeys, failed_hotkeys: failed }
+        Self { events: rx, _tray: tray, _hotkeys: hotkeys, instance, failed_hotkeys: failed }
+    }
+
+    /// Plexi is quitting: later launches should wait for it to go, not hand over to it.
+    pub fn closing(&self) {
+        if let Some(l) = &self.instance {
+            l.stop();
+        }
     }
 }
 

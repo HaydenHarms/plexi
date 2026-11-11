@@ -244,6 +244,8 @@ pub struct StartOptions {
     pub background: bool,
     /// Register global hotkeys and the tray icon (off in tests).
     pub shell: bool,
+    /// The right to be the one Plexi running; later launches are handed to this one.
+    pub instance: Option<crate::instance::Primary>,
 }
 
 enum Job {
@@ -376,7 +378,7 @@ pub struct PlexiApp {
 }
 
 impl PlexiApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, start: StartOptions) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, mut start: StartOptions) -> Self {
         crate::ui::install_style(&cc.egui_ctx);
         let config = Config::load();
         FontBook::warm_up();
@@ -450,7 +452,7 @@ impl PlexiApp {
             if app.config.check_updates {
                 app.check_for_updates(&cc.egui_ctx, false);
             }
-            let shell = Shell::start(&cc.egui_ctx, &app.config);
+            let shell = Shell::start(&cc.egui_ctx, &app.config, start.instance.take());
             if !shell.failed_hotkeys.is_empty() {
                 app.toast_error(format!("Hotkey already in use by another app: {}", shell.failed_hotkeys.join(", ")));
             }
@@ -790,6 +792,8 @@ impl PlexiApp {
                             self.config.last_file = self.path.clone();
                         }
                         self.config.save();
+                        // The new Plexi must wait for this one to go, not hand itself over.
+                        self.closing();
                         updater::apply(updater::install_kind(), &path)
                     });
                     match applied {
@@ -2048,6 +2052,13 @@ impl PlexiApp {
         }
     }
 
+    /// Plexi is on its way out; a launch from now on starts fresh instead of handing over.
+    fn closing(&self) {
+        if let Some(s) = &self.shell {
+            s.closing();
+        }
+    }
+
     fn handle_shell_events(&mut self, ctx: &Context) {
         let events: Vec<ShellEvent> = match &self.shell {
             Some(s) => s.events.try_iter().collect(),
@@ -2062,6 +2073,20 @@ impl PlexiApp {
                         self.set_passthrough(ctx, on);
                     }
                 },
+                ShellEvent::Draw => match &self.mode {
+                    Mode::Notebook => self.enter_overlay(ctx, false),
+                    Mode::Overlay(o) if o.passthrough => self.set_passthrough(ctx, false),
+                    Mode::Overlay(_) => {}
+                },
+                ShellEvent::Open(p) => {
+                    if self.is_overlay() {
+                        self.exit_overlay(ctx);
+                    }
+                    self.finish_text_edit();
+                    self.open_path(&p);
+                    ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(ViewportCommand::Focus);
+                }
                 ShellEvent::ClearOverlay => self.clear_overlay(),
                 ShellEvent::Snip => {
                     if !matches!(&self.mode, Mode::Overlay(o) if o.snip.is_some()) {
@@ -2077,6 +2102,7 @@ impl PlexiApp {
                     }
                 }
                 ShellEvent::Quit => {
+                    self.closing();
                     self.quit_requested = true;
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
@@ -2407,6 +2433,9 @@ impl eframe::App for PlexiApp {
         if self.update_quit {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.closing();
+        }
         self.handle_shell_events(&ctx);
         self.drive_overlay(&ctx);
         self.handle_drops_and_paste(&ctx);
@@ -2496,7 +2525,10 @@ mod tests {
             unsafe { std::env::set_var("PLEXI_DATA_DIR", &dir) };
             let ctx = Context::default();
             let cc = eframe::CreationContext::_new_kittest(ctx.clone());
-            let app = PlexiApp::new(&cc, StartOptions { file: None, overlay: false, background: false, shell: false });
+            let app = PlexiApp::new(
+                &cc,
+                StartOptions { file: None, overlay: false, background: false, shell: false, instance: None },
+            );
             let mut h = Self { ctx, app, frame: eframe::Frame::_new_kittest(), time: 0.0 };
             h.step(vec![]);
             h

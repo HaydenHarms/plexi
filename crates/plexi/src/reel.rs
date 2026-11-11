@@ -186,7 +186,10 @@ impl Recorder {
         let ctx = Context::default();
         ctx.set_pixels_per_point(PPP);
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
-        let app = PlexiApp::new(&cc, StartOptions { file: None, overlay: false, background: false, shell: false });
+        let app = PlexiApp::new(
+            &cc,
+            StartOptions { file: None, overlay: false, background: false, shell: false, instance: None },
+        );
         let mut r = Self {
             backdrop: None,
             ctx,

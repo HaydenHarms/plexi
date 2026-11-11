@@ -339,6 +339,14 @@ mod imp {
         let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
     }
 
+    /// Let whichever process comes next take the foreground: a second launch calls this
+    /// before handing over to the Plexi that's already running, so that one can come
+    /// to the front (Windows refuses a background process otherwise).
+    pub fn allow_foreground_handoff() {
+        use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
+        let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    }
+
     pub fn capture_main_screen() -> Option<image::RgbaImage> {
         cursor_monitor().and_then(capture)
     }
@@ -458,6 +466,7 @@ mod imp {
     }
     pub fn show_in_taskbar(_: isize, _: bool) {}
     pub fn attach_parent_console() {}
+    pub fn allow_foreground_handoff() {}
     pub fn cursor_in_window(_: isize) -> Option<[f32; 2]> {
         None
     }
