@@ -4010,7 +4010,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plexi"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "directories",
  "eframe",
@@ -4035,7 +4035,7 @@ dependencies = [
 
 [[package]]
 name = "plexi-core"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "base64 0.23.1",
  "epaint_default_fonts",
