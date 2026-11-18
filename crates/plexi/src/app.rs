@@ -1,6 +1,7 @@
 //! Application state and the frame loop: file handling, mode switching between the
 //! notebook window and the on-screen overlay, commands and shortcuts.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -156,6 +157,9 @@ pub struct ExportDialog {
     /// [`Area::Region`]: printing or exporting a section of the canvas regardless of
     /// sheet outlines.
     pub region: Option<plexi_core::Rect>,
+    /// The element ids to export when selection filtering is on.
+    pub only_selection: Option<Vec<u64>>,
+    pub unchecked_selection: Option<Vec<u64>>,
     /// Where the area sits on its sheet, dragged in the preview (see `Layout::place`).
     pub place: Option<[f32; 2]>,
     /// How big the picked area prints on paper: fit on one sheet, at `size_percent`, or
@@ -175,6 +179,19 @@ pub enum SizeMode {
 }
 
 impl ExportDialog {
+    pub fn set_format(&mut self, format: ExportFormat) {
+        self.format = format;
+        self.fit_image_region();
+    }
+
+    pub fn fit_image_region(&mut self) {
+        if self.area == Area::Region && self.region.is_some() && self.format.one_page_per_file() {
+            self.paper = PaperChoice::Fit;
+            self.tile = false;
+            self.margin_in = 0.0;
+        }
+    }
+
     pub fn sheet(&self) -> Option<[f32; 2]> {
         let [w, h] = match self.paper {
             PaperChoice::Fit => return None,
@@ -212,6 +229,23 @@ impl ExportDialog {
         }
         layout::parse_page_list(&self.page_list, total).map(Some)
     }
+}
+
+/// Use the same filtered page for frame layout and rendering.
+pub(crate) fn export_page<'a>(page: &'a Page, selection: Option<&[u64]>) -> Cow<'a, Page> {
+    match selection {
+        Some(ids) => {
+            let mut page = page.clone();
+            page.elements.retain(|e| ids.contains(&e.id()));
+            Cow::Owned(page)
+        }
+        None => Cow::Borrowed(page),
+    }
+}
+
+fn write_picture(doc: &Document, asset: &str, path: &Path) -> Result<(), String> {
+    let bytes = doc.assets.get(asset).ok_or("Picture data is missing")?;
+    std::fs::write(path, bytes.as_slice()).map_err(|e| e.to_string())
 }
 
 /// The right-click menu on the canvas.
@@ -305,6 +339,7 @@ pub struct PlexiApp {
     /// something.
     pub pending_snapshot: Option<Snapshot>,
     pub selection: HashSet<u64>,
+    last_nudge: Option<(Target, f64)>,
     /// The last copied selection (Ctrl+C), pasted back with Ctrl+V. Elements keep their
     /// ids until paste gives the copies fresh ones, so repeated pastes don't collide.
     pub clip: Option<Vec<Element>>,
@@ -402,6 +437,7 @@ impl PlexiApp {
             interaction: Interaction::Idle,
             pending_snapshot: None,
             selection: HashSet::new(),
+            last_nudge: None,
             clip: None,
             clip_sequence: None,
             editing_text: None,
@@ -518,6 +554,7 @@ impl PlexiApp {
 
     /// Mark the document changed (autosave picks it up shortly after).
     pub fn touch(&mut self) {
+        self.last_nudge = None;
         self.dirty = true;
         self.last_edit = Instant::now();
         self.revision += 1;
@@ -900,10 +937,26 @@ impl PlexiApp {
         }
     }
 
+    fn write_export(
+        doc: &Document,
+        page: usize,
+        scope: ExportScope,
+        selection: Option<&[u64]>,
+        format: ExportFormat,
+        opts: &RenderOptions,
+        path: &Path,
+    ) -> Result<Vec<PathBuf>, String> {
+        let pages: Vec<_> =
+            Self::export_page_list(doc, scope, page).into_iter().map(|p| export_page(p, selection)).collect();
+        let pages: Vec<_> = pages.iter().map(|p| p.as_ref()).collect();
+        plexi_core::export::export(doc, &pages, format, opts, path).map_err(|e| e.to_string())
+    }
+
     /// Write the export dialog's pages to a PDF in the temp folder and open it, to print
     /// from the system's PDF viewer.
     pub fn run_print(&mut self) {
-        let Some(scope) = self.export.as_ref().map(|d| d.scope) else { return };
+        let Some(dlg) = &self.export else { return };
+        let (scope, selection) = (dlg.scope, dlg.only_selection.clone());
         let Some(mut opts) = self.export_options() else { return };
         opts.scale = 1.0;
         self.export = None;
@@ -916,17 +969,15 @@ impl PlexiApp {
         let tx = self.jobs_tx.clone();
         self.toast("Preparing to print…");
         std::thread::spawn(move || {
-            let pages = Self::export_page_list(&doc, scope, page);
-            let r = plexi_core::export::export(&doc, &pages, ExportFormat::Pdf, &opts, &path)
-                .map(|_| path)
-                .map_err(|e| e.to_string());
+            let r = Self::write_export(&doc, page, scope, selection.as_deref(), ExportFormat::Pdf, &opts, &path)
+                .map(|_| path);
             let _ = tx.send(Job::Printed(r));
         });
     }
 
     pub fn run_export(&mut self) {
         let Some(dlg) = &self.export else { return };
-        let (format, scope) = (dlg.format, dlg.scope);
+        let (format, scope, selection) = (dlg.format, dlg.scope, dlg.only_selection.clone());
         let Some(opts) = self.export_options() else { return };
         let stem = match scope {
             ExportScope::CurrentPage if self.doc.pages.len() > 1 => {
@@ -952,8 +1003,7 @@ impl PlexiApp {
         let tx = self.jobs_tx.clone();
         self.toast("Exporting…");
         std::thread::spawn(move || {
-            let pages = Self::export_page_list(&doc, scope, page);
-            let r = plexi_core::export::export(&doc, &pages, format, &opts, &path).map_err(|e| e.to_string());
+            let r = Self::write_export(&doc, page, scope, selection.as_deref(), format, &opts, &path);
             let _ = tx.send(Job::Exported(r));
         });
     }
@@ -1057,6 +1107,33 @@ impl PlexiApp {
         self.page_mut(t).elements.push(Element::Image(img));
         self.selection = [id].into();
         self.tool = Tool::Lasso;
+    }
+
+    pub fn save_picture(&mut self, img: &ImageEl) {
+        let Some(bytes) = self.doc.assets.get(&img.asset) else {
+            self.toast_error("Picture data is missing");
+            return;
+        };
+        // Older documents store GIFs under a PNG asset key.
+        let ext = if bytes.starts_with(b"GIF8") {
+            "gif"
+        } else {
+            Path::new(&img.asset).extension().and_then(|e| e.to_str()).unwrap_or("png")
+        };
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter("Picture", &[ext])
+            .set_file_name(format!("{} - picture.{ext}", self.display_name()))
+            .save_file()
+        else {
+            return;
+        };
+        if path.extension().is_none() {
+            path.set_extension(ext);
+        }
+        match write_picture(&self.doc, &img.asset, &path) {
+            Ok(()) => self.toast(format!("Saved {}", path.display())),
+            Err(e) => self.toast_error(format!("Could not save picture: {e}")),
+        }
     }
 
     /// Put the pages of a PDF on the canvas as pictures: drawn on a worker (big files
@@ -2123,6 +2200,69 @@ impl PlexiApp {
 
     // ----- shortcuts -----------------------------------------------------------------
 
+    fn canvas_accepts_arrows(&self, ctx: &Context) -> bool {
+        matches!(self.mode, Mode::Notebook)
+            && matches!(self.interaction, Interaction::Idle)
+            && self.editing_text.is_none()
+            && !ctx.egui_wants_keyboard_input()
+            && !self.palette.open
+            && self.export.is_none()
+            && !self.settings_open
+            && !self.help_open
+            && !self.handwriting.open
+            && self.context_menu.is_none()
+            && self.crop.is_none()
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.memory(|m| m.top_modal_layer().is_none())
+    }
+
+    /// Move the selection or scroll the notebook with the arrow keys.
+    fn canvas_arrows(&mut self, ctx: &Context, was_available: bool) {
+        if !was_available || !self.canvas_accepts_arrows(ctx) {
+            self.last_nudge = None;
+            return;
+        }
+        let selected = !self.selection.is_empty();
+        let small = egui::Vec2::splat(if selected { 1.0 } else { 60.0 });
+        let large = if selected {
+            egui::Vec2::splat(10.0)
+        } else {
+            (ctx.content_rect().size() - egui::Vec2::splat(80.0)).max(egui::Vec2::ZERO)
+        };
+        let (delta, now) = ctx.input_mut(|i| {
+            let mut delta = egui::Vec2::ZERO;
+            i.events.retain(|event| {
+                let egui::Event::Key { key, pressed: true, modifiers, .. } = event else { return true };
+                if *modifiers != Modifiers::NONE && *modifiers != Modifiers::SHIFT {
+                    return true;
+                }
+                let step = if modifiers.shift { large } else { small };
+                match key {
+                    Key::ArrowLeft => delta.x -= step.x,
+                    Key::ArrowRight => delta.x += step.x,
+                    Key::ArrowUp => delta.y -= step.y,
+                    Key::ArrowDown => delta.y += step.y,
+                    _ => return true,
+                }
+                false
+            });
+            (delta, i.time)
+        });
+        if delta == egui::Vec2::ZERO {
+            return;
+        }
+        if selected {
+            let t = self.target();
+            let checkpoint = self.last_nudge.is_none_or(|(target, time)| target != t || now - time >= 1.0);
+            self.move_selection(t, [delta.x, delta.y], checkpoint);
+            self.last_nudge = Some((t, now));
+        } else {
+            self.last_nudge = None;
+            self.view.offset -= delta;
+        }
+        ctx.request_repaint();
+    }
+
     fn shortcuts(&mut self, ctx: &Context) {
         let typing = self.editing_text.is_some() || ctx.egui_wants_keyboard_input();
         let cmd = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, k));
@@ -2189,14 +2329,8 @@ impl PlexiApp {
         if cmd(Key::N) {
             self.new_document();
         }
-        if cmd(Key::E) {
+        if cmd(Key::E) || cmd(Key::P) {
             self.open_export_dialog();
-        }
-        if cmd(Key::P) {
-            self.open_export_dialog();
-            if let Some(d) = &mut self.export {
-                d.format = ExportFormat::Pdf;
-            }
         }
         if cmd(Key::A) {
             self.select_all();
@@ -2347,17 +2481,41 @@ impl PlexiApp {
     }
 
     pub fn open_export_dialog(&mut self) {
+        self.open_export_dialog_for(ExportFormat::Pdf, false);
+    }
+
+    /// "Export selection…": a PNG of just what's selected, at its own size.
+    pub fn export_selection(&mut self) {
+        self.open_export_dialog_for(ExportFormat::Png, true);
+    }
+
+    /// Open the export dialog on `format`; with `selection`, on just what's selected.
+    fn open_export_dialog_for(&mut self, format: ExportFormat, selection: bool) {
         self.finish_text_edit();
         let scope = if self.is_overlay() { ExportScope::ScreenInk } else { ExportScope::CurrentPage };
         // An infinite canvas prints on the sheets its guides show; a fixed page as itself.
         let infinite = !self.is_overlay() && self.doc.pages[self.page].size.dims().is_none();
         let paper = if infinite { PaperChoice::Preset(self.config.sheet_paper) } else { PaperChoice::Fit };
-        // A snapshot just taken here is the area you'll likely want; otherwise pick one
-        // with "Select area…".
-        let region = self.last_snapshot.filter(|(t, _)| *t == self.target()).map(|(_, r)| r);
+        let target = self.target();
+        let mut only_selection = None;
+        let picked = if selection { self.selection_bounds(target) } else { None };
+        let region = if let Some(mut bounds) = picked {
+            let ids: HashSet<_> = self.selection.iter().flat_map(|&id| self.group_of(target, id)).collect();
+            let mut selected = Vec::new();
+            for e in &self.page_ref(target).elements {
+                if ids.contains(&e.id()) {
+                    selected.push(e.id());
+                    bounds = bounds.union(e.bounds());
+                }
+            }
+            only_selection = Some(selected);
+            Some(bounds.expand(4.0))
+        } else {
+            self.last_snapshot.filter(|(t, _)| *t == target).map(|(_, r)| r)
+        };
         self.picking_area = false;
-        self.export = Some(ExportDialog {
-            format: ExportFormat::Pdf,
+        let mut dlg = ExportDialog {
+            format,
             scope,
             scale: 2.0,
             background: !self.is_overlay(),
@@ -2370,12 +2528,16 @@ impl PlexiApp {
             pick_pages: false,
             page_list: String::new(),
             region,
+            only_selection,
+            unchecked_selection: None,
             place: None,
             size_mode: SizeMode::Fit,
             size_percent: 100.0,
             size_across: 2,
             preview: Default::default(),
-        });
+        };
+        dlg.fit_image_region();
+        self.export = Some(dlg);
     }
 
     /// "Select area…" finished: export just `area` of target `t`.
@@ -2384,6 +2546,7 @@ impl PlexiApp {
             dlg.region = Some(area);
             dlg.place = None;
             dlg.area = Area::Region;
+            dlg.fit_image_region();
             dlg.scope = match t {
                 Target::Overlay => ExportScope::ScreenInk,
                 Target::Page(_) => ExportScope::CurrentPage,
@@ -2450,6 +2613,18 @@ impl eframe::App for PlexiApp {
             }
         }
 
+        let arrows_available = self.canvas_accepts_arrows(&ctx);
+        if ctx.input(|i| {
+            i.events.iter().any(|e| match e {
+                egui::Event::PointerButton { .. } => true,
+                egui::Event::Key { key, pressed: true, .. } => {
+                    !matches!(key, Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown)
+                }
+                _ => false,
+            })
+        }) {
+            self.last_nudge = None;
+        }
         let rect = ui.max_rect();
         let hidden = self.hide_for_capture();
         match self.mode.clone() {
@@ -2461,6 +2636,7 @@ impl eframe::App for PlexiApp {
             crate::ui::dialogs(self, &ctx);
         }
         self.shortcuts(&ctx);
+        self.canvas_arrows(&ctx, arrows_available);
         self.record_frame(&ctx);
         self.autosave();
         self.update_title(&ctx);
@@ -2622,6 +2798,66 @@ mod tests {
     }
 
     #[test]
+    fn arrow_keys_nudge_the_selection_with_one_undo() {
+        let mut h = Harness::new();
+        h.app.tool = Tool::Shape(ShapeKind::Rect);
+        h.drag(PointerButton::Primary, &[(300.0, 300.0), (400.0, 400.0)]);
+        let before = h.elements()[0].bounds();
+        h.app.tool = Tool::Lasso;
+        h.click(350.0, 300.0);
+        assert_eq!(h.app.selection.len(), 1);
+
+        for _ in 0..3 {
+            h.step(vec![key(Key::ArrowRight)]);
+        }
+        h.set_shift(true);
+        h.step(vec![Event::Key {
+            key: Key::ArrowDown,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::SHIFT,
+        }]);
+        let after = h.elements()[0].bounds();
+        assert_eq!(after.min, [before.min[0] + 3.0, before.min[1] + 10.0]);
+        h.app.undo();
+        assert_eq!(h.elements()[0].bounds(), before);
+    }
+
+    #[test]
+    fn arrow_keys_pan_without_a_selection() {
+        let mut h = Harness::new();
+        h.app.tool = Tool::Shape(ShapeKind::Rect);
+        h.drag(PointerButton::Primary, &[(300.0, 300.0), (400.0, 400.0)]);
+        let before = h.elements()[0].bounds();
+        let offset = h.app.view.offset;
+        assert!(h.app.selection.is_empty());
+
+        h.step(vec![key(Key::ArrowDown)]);
+        assert_eq!(h.app.view.offset, offset - egui::vec2(0.0, 60.0));
+        assert_eq!(h.elements()[0].bounds(), before);
+    }
+
+    #[test]
+    fn arrow_keys_leave_the_canvas_alone_while_editing_text() {
+        let mut h = Harness::new();
+        h.app.tool = Tool::Text;
+        h.click(300.0, 400.0);
+        h.step(vec![Event::Text("hello".into())]);
+        let before = h.elements()[0].bounds();
+        let offset = h.app.view.offset;
+        let selection = h.app.selection.clone();
+        assert!(h.app.editing_text.is_some());
+
+        h.step(vec![key(Key::ArrowLeft)]);
+        h.step(vec![key(Key::ArrowDown)]);
+        assert_eq!(h.app.selection, selection);
+        assert_eq!(h.app.view.offset, offset);
+        assert_eq!(h.elements()[0].bounds(), before);
+        assert!(h.app.editing_text.is_some());
+    }
+
+    #[test]
     fn lasso_select_move_delete() {
         let mut h = Harness::new();
         h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
@@ -2764,16 +3000,12 @@ mod tests {
         h.drag(PointerButton::Primary, &line(300.0, 500.0, 300.0));
         h.drag(PointerButton::Primary, &line(300.0, 500.0, 600.0));
 
-        // A selection no longer decides the area: the dialog starts on the whole page.
-        h.app.tool = Tool::RectSelect;
-        h.drag(PointerButton::Primary, &[(250.0, 250.0), (550.0, 350.0)]);
         h.app.open_export_dialog();
         assert_eq!(h.app.export.as_ref().unwrap().area, Area::Page);
         assert!(h.app.export.as_ref().unwrap().region.is_none());
 
         // "Select area…": the dialog steps aside, a box dragged on the canvas (whatever
         // the tool) becomes the area, and the dialog comes back on it.
-        h.app.selection.clear();
         h.app.tool = Tool::Pen;
         h.app.picking_area = true;
         h.step(vec![]);
@@ -2811,6 +3043,85 @@ mod tests {
         let dlg = h.app.export.as_ref().unwrap();
         assert_eq!(dlg.area, Area::Region);
         assert!(dlg.region.is_some_and(|r| r.contains(other) && !r.contains(first)));
+    }
+
+    #[test]
+    fn selection_exports_as_one_png_without_overlapping_unselected_shapes() {
+        let mut h = Harness::new();
+        let red = Color::rgb(255, 0, 0);
+        let blue = Color::rgb(0, 0, 255);
+        let selected = Shape::new(ShapeKind::Rect, [20.0, 20.0], [80.0, 80.0], red, 4.0);
+        let other = Shape::new(ShapeKind::Rect, [60.0, 30.0], [160.0, 100.0], blue, 4.0);
+        let id = selected.id;
+        let page = &mut h.app.doc.pages[0];
+        assert!(page.size.dims().is_none());
+        page.elements.extend([Element::Shape(selected), Element::Shape(other)]);
+        h.app.selection.insert(id);
+        h.app.open_export_dialog();
+        let dlg = h.app.export.as_ref().unwrap();
+        assert!(dlg.only_selection.is_none() && dlg.area == Area::Page, "Ctrl+E still exports the page");
+        h.app.export = None;
+        h.app.export_selection();
+
+        let dlg = h.app.export.as_mut().unwrap();
+        assert_eq!(dlg.area, Area::Region);
+        assert_eq!(dlg.only_selection.as_deref(), Some([id].as_slice()));
+        let region = dlg.region.unwrap();
+        let selected_bounds = h.app.doc.pages[0].elements[0].bounds();
+        let other_bounds = h.app.doc.pages[0].elements[1].bounds();
+        assert!(region.contains(selected_bounds.min) && region.contains(selected_bounds.max));
+        assert!(region.intersects(&other_bounds) && !region.contains(other_bounds.center()));
+        assert_eq!(dlg.format, ExportFormat::Png);
+        assert_eq!(dlg.paper, PaperChoice::Fit, "a picture of the selection, not a sheet");
+        // Back on paper, then picking PNG again sizes it to the area again.
+        dlg.paper = PaperChoice::Preset(0);
+        dlg.set_format(ExportFormat::Pdf);
+        assert!(matches!(dlg.paper, PaperChoice::Preset(_)));
+        dlg.set_format(ExportFormat::Png);
+        assert_eq!(dlg.paper, PaperChoice::Fit);
+        assert!(!dlg.tile);
+        dlg.background = false;
+
+        h.step(vec![]);
+        let dlg = h.app.export.as_ref().unwrap();
+        let frame = layout::Frame { clip: Some(region), ..layout::Frame::exact(region) };
+        assert_eq!(dlg.preview.frames, [(Some(0), frame)]);
+        let opts = h.app.export_options().unwrap();
+        let dlg = h.app.export.as_ref().unwrap();
+        let dir = std::env::temp_dir().join(format!("plexi-export-test-{}-{}", std::process::id(), id));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("selection.png");
+        let files = PlexiApp::write_export(
+            &h.app.doc,
+            h.app.page,
+            dlg.scope,
+            dlg.only_selection.as_deref(),
+            dlg.format,
+            &opts,
+            &path,
+        )
+        .unwrap();
+        assert_eq!(files, std::slice::from_ref(&path));
+        let img = image::open(&path).unwrap().to_rgba8();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        assert_eq!(img.width(), (region.width() * opts.scale).ceil() as u32);
+        assert_eq!(img.height(), (region.height() * opts.scale).ceil() as u32);
+        assert!(img.pixels().any(|p| p.0 == red.0));
+        assert!(img.pixels().all(|p| p.0[2] == 0));
+    }
+
+    #[test]
+    fn save_picture_writes_the_original_asset_bytes() {
+        let mut h = Harness::new();
+        let bytes = gif(&[[255, 0, 0, 255], [0, 255, 0, 255]], 100);
+        h.app.insert_image(bytes.clone(), None, &h.ctx);
+        let img = image_el(&h);
+        let path = std::env::temp_dir().join(format!("plexi-picture-test-{}-{}.gif", std::process::id(), img.id));
+        write_picture(&h.app.doc, &img.asset, &path).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(saved, bytes);
     }
 
     #[test]

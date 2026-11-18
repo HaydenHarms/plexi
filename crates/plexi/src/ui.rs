@@ -11,7 +11,9 @@ use plexi_core::export::ExportFormat;
 use plexi_core::export::layout::{Area, Frame as OutFrame, PAPERS};
 use plexi_core::{Background, Color, Element, PAPER_COLORS, PageSize, ShapeKind};
 
-use crate::app::{ExportScope, Mode, Overlay, PaperChoice, PlexiApp, SnapshotAction, Snip, SnipFrom, Tool};
+use crate::app::{
+    ExportScope, Mode, Overlay, PaperChoice, PlexiApp, SnapshotAction, Snip, SnipFrom, Tool, export_page,
+};
 use crate::canvas::color32;
 use crate::history::Target;
 
@@ -1429,13 +1431,16 @@ fn refresh_preview(app: &mut PlexiApp, ctx: &Context) {
     }
     let doc = &app.doc;
     let page_of = |i: Option<usize>| i.and_then(|i| doc.pages.get(i)).unwrap_or(&doc.overlay);
+    let selection = dlg.only_selection.as_deref();
     let key = format!(
-        "{:?}|{:?}|{}|{}|{}|{}",
-        opts.layout, pages, app.revision, opts.background, dlg.pick_pages, dlg.page_list
+        "{:?}|{:?}|{}|{}|{}|{}|{selection:?}",
+        opts.layout, pages, app.revision, opts.background, dlg.pick_pages, dlg.page_list,
     );
     if dlg.preview.key != key {
-        let all: Vec<_> =
-            pages.iter().flat_map(|&i| opts.frames(page_of(i)).into_iter().map(move |f| (i, f))).collect();
+        let all: Vec<_> = pages
+            .iter()
+            .flat_map(|&i| opts.frames(&export_page(page_of(i), selection)).into_iter().map(move |f| (i, f)))
+            .collect();
         let picked = dlg.pick(all.len());
         let pv = &mut dlg.preview;
         pv.total = all.len();
@@ -1475,7 +1480,7 @@ fn refresh_preview(app: &mut PlexiApp, ctx: &Context) {
     }
     let busy = pv.pending.as_ref().is_some_and(|(k, _)| *k == want);
     if pv.shown != want && !busy && pv.pending.is_none() {
-        let page = page_of(page_idx).clone();
+        let page = export_page(page_of(page_idx), selection).into_owned();
         let assets = doc.assets.clone();
         let px = PREVIEW_SIDE * ctx.pixels_per_point();
         opts.scale = (px / frame.size[0].max(frame.size[1]).max(1.0)).min(4.0);
@@ -1529,6 +1534,7 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
         return;
     }
     refresh_preview(app, ctx);
+    let selection_scope = if app.is_overlay() { ExportScope::ScreenInk } else { ExportScope::CurrentPage };
     let fixed_page = app.doc.pages[app.page].size.dims().is_some();
     let has_pages = app.doc.pages.len() > 1;
     let th_canvas = ctx.global_style().visuals.extreme_bg_color;
@@ -1657,17 +1663,21 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                             .show_ui(ui, |ui| {
                                 for f in ExportFormat::ALL {
                                     let l = format!("{}  (.{})", f.label(), f.extension());
-                                    ui.selectable_value(&mut dlg.format, f, l);
+                                    if ui.selectable_label(dlg.format == f, l).clicked() && dlg.format != f {
+                                        dlg.set_format(f);
+                                    }
                                 }
                             });
                         ui.end_row();
                         ui.label("What");
-                        ui.vertical(|ui| {
-                            ui.radio_value(&mut dlg.scope, ExportScope::CurrentPage, "This page");
-                            if has_pages && dlg.area != Area::Region {
-                                ui.radio_value(&mut dlg.scope, ExportScope::AllPages, "All pages");
-                            }
-                            ui.radio_value(&mut dlg.scope, ExportScope::ScreenInk, "Screen ink (overlay)");
+                        ui.add_enabled_ui(dlg.only_selection.is_none(), |ui| {
+                            ui.vertical(|ui| {
+                                ui.radio_value(&mut dlg.scope, ExportScope::CurrentPage, "This page");
+                                if has_pages && dlg.area != Area::Region {
+                                    ui.radio_value(&mut dlg.scope, ExportScope::AllPages, "All pages");
+                                }
+                                ui.radio_value(&mut dlg.scope, ExportScope::ScreenInk, "Screen ink (overlay)");
+                            })
                         });
                         if dlg.area == Area::Region && dlg.scope == ExportScope::AllPages {
                             dlg.scope = ExportScope::CurrentPage;
@@ -1704,9 +1714,13 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                                 ui.radio_value(&mut dlg.area, Area::Page, whole);
                                 ui.radio_value(&mut dlg.area, Area::Content, "Trim to the drawing");
                                 ui.horizontal(|ui| {
-                                    if dlg.region.is_some() {
-                                        ui.radio_value(&mut dlg.area, Area::Region, "Selected area")
-                                            .on_hover_text("Just this box, wherever the sheet outlines are");
+                                    if dlg.region.is_some()
+                                        && ui
+                                            .radio_value(&mut dlg.area, Area::Region, "Selected area")
+                                            .on_hover_text("Just this box, wherever the sheet outlines are")
+                                            .changed()
+                                    {
+                                        dlg.fit_image_region();
                                     }
                                     let label = if dlg.region.is_some() { "Change…" } else { "Select area…" };
                                     if ui
@@ -1717,11 +1731,26 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
                                         pick = true;
                                     }
                                 });
+                                let mut only = dlg.only_selection.is_some();
+                                if (only || dlg.unchecked_selection.is_some())
+                                    && ui.checkbox(&mut only, "Only what's selected").changed()
+                                {
+                                    std::mem::swap(&mut dlg.only_selection, &mut dlg.unchecked_selection);
+                                    if only {
+                                        dlg.scope = selection_scope;
+                                    }
+                                }
                             });
                             ui.end_row();
 
                             ui.label("Paper");
-                            let fit_label = if fixed_page { "Same as the page" } else { "Fit to the drawing" };
+                            let fit_label = if dlg.area == Area::Region {
+                                "Fit to the area"
+                            } else if fixed_page {
+                                "Same as the page"
+                            } else {
+                                "Fit to the drawing"
+                            };
                             let current = match dlg.paper {
                                 PaperChoice::Fit => fit_label.to_owned(),
                                 PaperChoice::Preset(i) => PAPERS[i.min(PAPERS.len() - 1)].0.to_owned(),
@@ -1865,8 +1894,10 @@ fn export_window(app: &mut PlexiApp, ctx: &Context) {
     if !open {
         app.export = None;
     } else if go {
+        refresh_preview(app, ctx);
         app.run_export();
     } else if print {
+        refresh_preview(app, ctx);
         app.run_print();
     }
 }
@@ -1916,6 +1947,12 @@ fn context_menu(app: &mut PlexiApp, ctx: &Context) {
                     ui.separator();
                 }
                 if let Some(Element::Image(img)) = &hit
+                    && item(ui, "Save picture…")
+                {
+                    app.save_picture(img);
+                    close = true;
+                }
+                if let Some(Element::Image(img)) = &hit
                     && !img.locked
                 {
                     if item(ui, "Crop image") {
@@ -1937,6 +1974,10 @@ fn context_menu(app: &mut PlexiApp, ctx: &Context) {
                     ui.separator();
                 }
                 if !app.selection.is_empty() {
+                    if item(ui, "Export selection…") {
+                        app.export_selection();
+                        close = true;
+                    }
                     if item(ui, "Bring to front") {
                         app.restack_selection(true);
                         close = true;
@@ -2147,6 +2188,7 @@ fn help_window(app: &mut PlexiApp, ctx: &Context) {
                 ("Pan", "Right-drag · Space+drag · Shift+scroll · two fingers".into()),
                 ("Zoom", "Scroll wheel · pinch · Ctrl+= / Ctrl+-".into()),
                 ("Fit page", "Ctrl+0".into()),
+                ("Move the selection, or scroll the canvas", "Arrow keys (Shift for bigger steps)".into()),
                 ("Undo · Redo", "Ctrl+Z · Ctrl+Y".into()),
                 ("New page · Next · Previous", "Ctrl+Enter · PgDn · PgUp".into()),
                 ("Select all · Duplicate · Delete", "Ctrl+A · Ctrl+D · Del".into()),

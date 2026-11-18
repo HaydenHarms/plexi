@@ -693,6 +693,24 @@ pub fn paint_page(
 }
 
 impl PlexiApp {
+    /// Apply a move, taking an undo snapshot at the start of the move.
+    pub(crate) fn move_selection(&mut self, t: Target, delta: [f32; 2], checkpoint: bool) {
+        if checkpoint {
+            self.checkpoint(t);
+        } else {
+            self.touch();
+        }
+        let selection = std::mem::take(&mut self.selection);
+        let mut moved = HashSet::new();
+        for e in &mut self.page_mut(t).elements {
+            if selection.contains(&e.id()) {
+                e.translate(delta[0], delta[1]);
+                moved.insert(e.id());
+            }
+        }
+        self.selection = moved;
+    }
+
     pub fn view_for(&self, t: Target) -> View {
         match t {
             Target::Overlay => View::default(),
@@ -1786,16 +1804,7 @@ impl PlexiApp {
             }
             Interaction::Move { delta, .. } => {
                 if delta[0].abs() + delta[1].abs() > 0.01 {
-                    self.checkpoint(t);
-                    let sel = std::mem::take(&mut self.selection);
-                    let mut new_sel = HashSet::new();
-                    for e in &mut self.page_mut(t).elements {
-                        if sel.contains(&e.id()) {
-                            e.translate(delta[0], delta[1]);
-                            new_sel.insert(e.id());
-                        }
-                    }
-                    self.selection = new_sel;
+                    self.move_selection(t, delta, true);
                 }
             }
             Interaction::Shape { kind, start, end } => {

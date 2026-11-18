@@ -1,2 +1,2 @@
-- [ ] Allow arrow key navigating on the canvas
-- [ ] I can't just print the selected area as png, it will just print the entire page not the png. We need better single-image exporting.
+- [x] Allow arrow key navigating on the canvas
+- [x] I can't just print the selected area as png, it will just print the entire page not the png. We need better single-image exporting.

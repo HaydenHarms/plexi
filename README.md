@@ -88,8 +88,9 @@ and draw-on-screen covers the main display.
 | Group, ungroup | <kbd>Ctrl</kbd>+<kbd>G</kbd>, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd>, or right-click; a group is picked up and moved as one |
 | Lock | <kbd>Ctrl</kbd>+<kbd>L</kbd> or right-click locks what's selected (ink, text, shapes, images, any number at once) so it can't be picked up, moved or erased; right-click it to unlock |
 | Crop an image, remove its background, arrange, paper color, sheet outlines and numbers | right-click |
-| Export, print | <kbd>Ctrl</kbd>+<kbd>E</kbd> or <kbd>Ctrl</kbd>+<kbd>P</kbd>: pick sheets, or **Select area…** to drag a box around just a part (the last snapshot's area is offered too) and drag it in the preview to place it on the sheet, or under **Size** scale it or stretch it across several sheets to tape together, then **Print…** opens the PDF to print |
+| Export, print | <kbd>Ctrl</kbd>+<kbd>E</kbd> or <kbd>Ctrl</kbd>+<kbd>P</kbd> opens export. Right-click and choose **Export selection…** to export just the selected items as a PNG sized to the selection. Use **Select area…** to draw a box or use the area from your last snapshot. On paper, drag the area into position in the preview or use **Size** to scale it across sheets. **Print…** opens the PDF to print. Right-click an image and choose **Save picture…** to save the original picture bytes. |
 | Everything else | <kbd>Ctrl</kbd>+<kbd>K</kbd> command palette, <kbd>F1</kbd> shortcuts |
+| Move the selection, or scroll the canvas | Arrow keys (hold <kbd>Shift</kbd> for bigger steps) |
 
 Paste or drop images straight onto a page. The tray icon (left-click) toggles drawing on
 screen. Hotkeys can be changed in Settings (<kbd>Ctrl</kbd>+<kbd>,</kbd>).
